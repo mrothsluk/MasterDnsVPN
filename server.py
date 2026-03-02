@@ -416,7 +416,7 @@ class MasterDnsVPNServer:
             try:
                 try:
                     data, addr = await asyncio.wait_for(
-                        async_recvfrom(self.loop, self.udp_sock, 65536), timeout=0.1
+                        async_recvfrom(self.loop, self.udp_sock, 65536), timeout=1.0
                     )
                 except asyncio.TimeoutError:
                     continue

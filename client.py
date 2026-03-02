@@ -897,7 +897,7 @@ class MasterDnsVPNClient:
                 )
 
                 if idle_duration < 2.0:
-                    current_timeout = 0.1
+                    current_timeout = 0.5
                 elif idle_duration < 10.0:
                     current_timeout = 1.0
                 else:

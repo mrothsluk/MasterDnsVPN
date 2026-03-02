@@ -234,6 +234,14 @@ class ARQStream:
         try:
             current_task = asyncio.current_task()
             if getattr(self, "io_task", None) and self.io_task != current_task:
-                self.io_task.cancel()
-        except Exception:
-            pass
+                if not self.io_task.done():
+                    self.io_task.cancel()
+                    try:
+                        await self.io_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Error closing IO task: {e}")
