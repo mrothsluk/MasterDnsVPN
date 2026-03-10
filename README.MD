@@ -10,6 +10,16 @@ The primary goal of **MasterDnsVPN** is to provide a secure, reliable, and flexi
 
 ---
 
+# Announcement Channel 📢
+
+### For the latest news, updates, and changes regarding this project, please follow our Telegram channel: [Telegram Channel](https://t.me/masterdnsvpn)
+
+---
+
+⭐ If you use or like this project, please consider supporting us by giving the repository a Star! ⭐
+
+---
+
 ## Key Features & Advantages ✨
 
 - 🛡️ **Bypassing Strict Censorship:**  Specifically designed to increase the probability of penetrating firewalls and restrictive network policies that block standard VPN protocols.
@@ -32,11 +42,6 @@ The primary goal of **MasterDnsVPN** is to provide a secure, reliable, and flexi
 
 - 🚀 **Forwarding Various TCP Protocols:** Besides the highly optimized SOCKS5 integration, you can also forward other TCP-based services like `VLESS`, `ShadowSocks`, `VMESS`, etc.
 
----
-
-⭐ If you use or like this project, please consider supporting us by giving the repository a Star! ⭐
-
----
 
 # Setup Guide 🧑‍💻
 

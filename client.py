@@ -544,6 +544,11 @@ class MasterDnsVPNClient:
         return False, 0
 
     async def _config_recommendations(self):
+
+        self.logger.info("<yellow>" + "=" * 80 + "</yellow>")
+        self.logger.success(
+            "<fg #ff456d>📢 Don't forget to join our Telegram channel: <cyan>@MasterDNSVPN</cyan> for support, updates, and community discussions! 📢</fg #ff456d>"
+        )
         self.logger.info("<yellow>" + "=" * 80 + "</yellow>")
         self.logger.info("<cyan>📊 Config Recommendations:</cyan>")
         self.logger.info(
@@ -786,12 +791,17 @@ class MasterDnsVPNClient:
 
             try:
                 self.logger.info("<yellow>" + "=" * 80 + "</yellow>")
+                self.logger.success(
+                    "<fg #ff456d>📢 Don't forget to join our Telegram channel: <cyan>@MasterDNSVPN</cyan> for support, updates, and community discussions! 📢</fg #ff456d>"
+                )
+                self.logger.info("<yellow>" + "=" * 80 + "</yellow>")
                 self.logger.info(
                     f"<fg #e8a251>Waiting for <cyan>{wait_time}</cyan> seconds before starting MTU tests...</fg #e8a251>"
                 )
                 self.logger.info(
                     "<fg #51e8bd>Press <cyan>ENTER</cyan> key to skip the wait and start immediately...</fg #51e8bd>"
                 )
+
                 await asyncio.wait_for(
                     self.loop.run_in_executor(None, input), timeout=wait_time
                 )
@@ -2205,6 +2215,14 @@ class MasterDnsVPNClient:
             self.loop = asyncio.get_running_loop()
             self.logger.info("=" * 60)
             self.logger.success("<magenta>Starting MasterDnsVPN Client...</magenta>")
+            self.logger.success(
+                "<cyan>GitHub:</cyan> <blue>https://github.com/masterking32/MasterDnsVPN</blue>"
+            )
+            self.logger.success(
+                "<fg #03fcc2>Telegram:</fg #03fcc2> <blue>@MasterDnsVPN</blue>"
+            )
+
+            self.logger.info("=" * 60)
             if not self.domains or not self.resolvers:
                 self.logger.error(
                     "<red>Domains or Resolvers are missing in config.</red>"
