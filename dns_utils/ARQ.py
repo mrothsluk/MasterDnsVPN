@@ -6,10 +6,47 @@
 import asyncio
 import socket
 import time
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
+from dns_utils.DNS_ENUMS import Packet_Type
+
+
+@dataclass
+class _PendingControlPacket:
+    packet_type: int
+    sequence_num: int
+    ack_type: int
+    payload: bytes
+    priority: int
+    retries: int = 0
+    current_rto: float = 0.8
+    time: float = 0.0
+    create_time: float = 0.0
 
 
 class ARQ:
     _active_tasks = set()
+
+    CONTROL_ACK_PAIRS = {
+        Packet_Type.STREAM_SYN: Packet_Type.STREAM_SYN_ACK,
+        Packet_Type.STREAM_FIN: Packet_Type.STREAM_FIN_ACK,
+        Packet_Type.STREAM_RST: Packet_Type.STREAM_RST_ACK,
+        Packet_Type.SOCKS5_SYN: Packet_Type.SOCKS5_SYN_ACK,
+        Packet_Type.STREAM_KEEPALIVE: Packet_Type.STREAM_KEEPALIVE_ACK,
+        Packet_Type.STREAM_WINDOW_UPDATE: Packet_Type.STREAM_WINDOW_UPDATE_ACK,
+        Packet_Type.STREAM_PROBE: Packet_Type.STREAM_PROBE_ACK,
+        Packet_Type.SOCKS5_CONNECT_FAIL: Packet_Type.SOCKS5_CONNECT_FAIL_ACK,
+        Packet_Type.SOCKS5_RULESET_DENIED: Packet_Type.SOCKS5_RULESET_DENIED_ACK,
+        Packet_Type.SOCKS5_NETWORK_UNREACHABLE: Packet_Type.SOCKS5_NETWORK_UNREACHABLE_ACK,
+        Packet_Type.SOCKS5_HOST_UNREACHABLE: Packet_Type.SOCKS5_HOST_UNREACHABLE_ACK,
+        Packet_Type.SOCKS5_CONNECTION_REFUSED: Packet_Type.SOCKS5_CONNECTION_REFUSED_ACK,
+        Packet_Type.SOCKS5_TTL_EXPIRED: Packet_Type.SOCKS5_TTL_EXPIRED_ACK,
+        Packet_Type.SOCKS5_COMMAND_UNSUPPORTED: Packet_Type.SOCKS5_COMMAND_UNSUPPORTED_ACK,
+        Packet_Type.SOCKS5_ADDRESS_TYPE_UNSUPPORTED: Packet_Type.SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+        Packet_Type.SOCKS5_AUTH_FAILED: Packet_Type.SOCKS5_AUTH_FAILED_ACK,
+        Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE: Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+    }
 
     class _DummyLogger:
         def debug(self, *args, **kwargs):
@@ -38,6 +75,11 @@ class ARQ:
         max_rto: float = 1.5,
         is_socks: bool = False,
         initial_data: bytes = b"",
+        enqueue_control_tx_cb=None,
+        enable_control_reliability: bool = False,
+        control_rto: float = 0.8,
+        control_max_rto: float = 2.5,
+        control_max_retries: int = 15,
     ):
         self.stream_id = stream_id
         self.session_id = session_id
@@ -88,6 +130,16 @@ class ARQ:
         if not self.is_socks:
             self.socks_connected.set()
 
+        # Control-plane reliability (optional): keeps ARQ data-path intact
+        # while allowing control packets to be retried/acked with sequence numbers.
+        self.enqueue_control_tx = enqueue_control_tx_cb
+        self.enable_control_reliability = bool(enable_control_reliability)
+        self.control_rto = float(control_rto)
+        self.control_max_rto = float(control_max_rto)
+        self.control_max_retries = int(control_max_retries)
+        self.control_snd_buf: Dict[Tuple[int, int], _PendingControlPacket] = {}
+        self._control_ack_map = dict(self.CONTROL_ACK_PAIRS)
+        self._control_reverse_ack_map = {v: k for k, v in self._control_ack_map.items()}
         try:
             sock = writer.get_extra_info("socket")
             if sock and sock.fileno() != -1:
@@ -354,6 +406,192 @@ class ARQ:
         if self._rst_seq_sent is not None and sn == self._rst_seq_sent:
             self._rst_acked = True
 
+        if self.enable_control_reliability:
+            self._mark_control_acked(Packet_Type.STREAM_RST_ACK, sn)
+
+    def _norm_sn(self, sn: int) -> int:
+        return int(sn) & 0xFFFF
+
+    async def _send_control_frame(
+        self,
+        packet_type: int,
+        sequence_num: int,
+        payload: bytes = b"",
+        priority: int = 0,
+        is_retransmit: bool = False,
+    ) -> bool:
+        ptype = int(packet_type)
+        sn = self._norm_sn(sequence_num)
+        data = payload or b""
+
+        # Preferred path: direct control callback with explicit packet_type.
+        if self.enqueue_control_tx:
+            await self.enqueue_control_tx(
+                int(priority),
+                self.stream_id,
+                sn,
+                ptype,
+                data,
+                is_retransmit=is_retransmit,
+            )
+            return True
+
+        # Backward-compatible fallback using existing enqueue_tx flag API.
+        if ptype == Packet_Type.STREAM_FIN:
+            await self.enqueue_tx(int(priority), self.stream_id, sn, data, is_fin=True)
+            return True
+        if ptype == Packet_Type.STREAM_FIN_ACK:
+            await self.enqueue_tx(0, self.stream_id, sn, data, is_fin_ack=True)
+            return True
+        if ptype == Packet_Type.STREAM_RST:
+            await self.enqueue_tx(0, self.stream_id, sn, data, is_rst=True)
+            return True
+        if ptype == Packet_Type.STREAM_RST_ACK:
+            await self.enqueue_tx(0, self.stream_id, sn, data, is_rst_ack=True)
+            return True
+        if ptype == Packet_Type.STREAM_DATA_ACK:
+            await self.enqueue_tx(0, self.stream_id, sn, data, is_ack=True)
+            return True
+        if ptype == Packet_Type.SOCKS5_SYN:
+            await self.enqueue_tx(
+                int(priority), self.stream_id, sn, data, is_socks_syn=True
+            )
+            return True
+
+        # STREAM_SYN / STREAM_SYN_ACK and some control types need explicit control callback.
+        return False
+
+    def _track_control_packet(
+        self,
+        packet_type: int,
+        sequence_num: int,
+        ack_type: int,
+        payload: bytes,
+        priority: int,
+    ) -> None:
+        key = (int(packet_type), self._norm_sn(sequence_num))
+        if key in self.control_snd_buf:
+            return
+
+        now = time.monotonic()
+        self.control_snd_buf[key] = _PendingControlPacket(
+            packet_type=int(packet_type),
+            sequence_num=self._norm_sn(sequence_num),
+            ack_type=int(ack_type),
+            payload=payload or b"",
+            priority=int(priority),
+            retries=0,
+            current_rto=self.control_rto,
+            time=now,
+            create_time=now,
+        )
+
+    async def send_control_packet(
+        self,
+        packet_type: int,
+        sequence_num: int,
+        payload: bytes = b"",
+        priority: int = 0,
+        track_for_ack: bool = True,
+        ack_type: Optional[int] = None,
+    ) -> bool:
+        ptype = int(packet_type)
+        sn = self._norm_sn(sequence_num)
+
+        sent = await self._send_control_frame(
+            packet_type=ptype,
+            sequence_num=sn,
+            payload=payload,
+            priority=priority,
+            is_retransmit=False,
+        )
+        if not sent:
+            return False
+
+        if not (self.enable_control_reliability and track_for_ack):
+            return True
+
+        expected_ack = (
+            int(ack_type) if ack_type is not None else self._control_ack_map.get(ptype)
+        )
+        if expected_ack is None:
+            return True
+
+        self._track_control_packet(
+            packet_type=ptype,
+            sequence_num=sn,
+            ack_type=expected_ack,
+            payload=payload,
+            priority=priority,
+        )
+        return True
+
+    def _mark_control_acked(self, ack_packet_type: int, sequence_num: int) -> bool:
+        ack_ptype = int(ack_packet_type)
+        sn = self._norm_sn(sequence_num)
+
+        origin_ptype = self._control_reverse_ack_map.get(ack_ptype)
+        if origin_ptype is None:
+            return self.control_snd_buf.pop((ack_ptype, sn), None) is not None
+
+        if self.control_snd_buf.pop((origin_ptype, sn), None) is not None:
+            return True
+
+        # Compatibility fallback for peers that may ACK non-seq control with sn=0.
+        if self.control_snd_buf.pop((origin_ptype, 0), None) is not None:
+            return True
+
+        return False
+
+    async def receive_control_ack(
+        self, ack_packet_type: int, sequence_num: int
+    ) -> bool:
+        self.last_activity = time.monotonic()
+
+        ack_ptype = int(ack_packet_type)
+        sn = self._norm_sn(sequence_num)
+
+        if ack_ptype == Packet_Type.STREAM_FIN_ACK:
+            if self._fin_seq_sent is not None and sn == self._fin_seq_sent:
+                self._fin_acked = True
+        elif ack_ptype == Packet_Type.STREAM_RST_ACK:
+            if self._rst_seq_sent is not None and sn == self._rst_seq_sent:
+                self._rst_acked = True
+
+        return self._mark_control_acked(ack_ptype, sn)
+
+    async def _check_control_retransmits(self, now: float) -> None:
+        if not self.control_snd_buf:
+            return
+
+        for key, info in list(self.control_snd_buf.items()):
+            if (
+                info.create_time + 120.0 <= now
+                and info.retries >= self.control_max_retries
+            ):
+                self.control_snd_buf.pop(key, None)
+                continue
+
+            if now - info.time < info.current_rto:
+                continue
+
+            sent = await self._send_control_frame(
+                packet_type=info.packet_type,
+                sequence_num=info.sequence_num,
+                payload=info.payload,
+                priority=info.priority,
+                is_retransmit=True,
+            )
+
+            if not sent:
+                # Cannot resend this control type on legacy callback path.
+                self.control_snd_buf.pop(key, None)
+                continue
+
+            info.time = now
+            info.retries += 1
+            info.current_rto = min(self.control_max_rto, info.current_rto * 1.5)
+
     async def check_retransmits(self):
         if self.closed:
             return
@@ -392,6 +630,9 @@ class ARQ:
             else:
                 await _enqueue(1, _sid, sn, data, is_resend=True)
 
+        if self.enable_control_reliability:
+            await self._check_control_retransmits(now)
+
     async def abort(self, reason="Abort", send_rst=True):
         if self.closed:
             return
@@ -402,13 +643,23 @@ class ARQ:
                 self._rst_seq_sent = self.snd_nxt
 
             try:
-                await self.enqueue_tx(
-                    0,
-                    self.stream_id,
-                    self._rst_seq_sent,
-                    b"",
-                    is_rst=True,
-                )
+                if self.enable_control_reliability:
+                    await self.send_control_packet(
+                        packet_type=Packet_Type.STREAM_RST,
+                        sequence_num=self._rst_seq_sent,
+                        payload=b"",
+                        priority=0,
+                        track_for_ack=True,
+                        ack_type=Packet_Type.STREAM_RST_ACK,
+                    )
+                else:
+                    await self.enqueue_tx(
+                        0,
+                        self.stream_id,
+                        self._rst_seq_sent,
+                        b"",
+                        is_rst=True,
+                    )
             except Exception:
                 pass
 
@@ -432,13 +683,23 @@ class ARQ:
             if self._fin_seq_sent is None:
                 self._fin_seq_sent = self.snd_nxt
             try:
-                await self.enqueue_tx(
-                    4,
-                    self.stream_id,
-                    self._fin_seq_sent,
-                    b"",
-                    is_fin=True,
-                )
+                if self.enable_control_reliability:
+                    await self.send_control_packet(
+                        packet_type=Packet_Type.STREAM_FIN,
+                        sequence_num=self._fin_seq_sent,
+                        payload=b"",
+                        priority=4,
+                        track_for_ack=True,
+                        ack_type=Packet_Type.STREAM_FIN_ACK,
+                    )
+                else:
+                    await self.enqueue_tx(
+                        4,
+                        self.stream_id,
+                        self._fin_seq_sent,
+                        b"",
+                        is_fin=True,
+                    )
             except Exception:
                 pass
 
