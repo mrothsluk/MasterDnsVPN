@@ -197,6 +197,91 @@ jobs:
           cp client_resolvers.simple.txt dist/client_resolvers.txt || true
           cp server_config.toml.simple dist/server_config.toml || true
 
+      - name: Smoke test executables (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: powershell
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = "Stop"
+          Set-Location dist
+
+          $clientBin = "MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          $serverBin = "MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          $targets = @($clientBin, $serverBin)
+
+          foreach ($bin in $targets) {
+            if (-not (Test-Path $bin)) {
+              throw "Smoke test target not found: $bin"
+            }
+
+            Write-Host "Smoke testing $bin ..."
+            $outFile = "$bin.smoke.out"
+            $errFile = "$bin.smoke.err"
+            $proc = Start-Process -FilePath ".\\$bin" -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+            Start-Sleep -Seconds 5
+
+            if ($proc.HasExited) {
+              $code = $proc.ExitCode
+              Write-Host "$bin exited early with code $code"
+              if ($code -ne 0) {
+                Write-Host "---- STDOUT ($bin) ----"
+                if (Test-Path $outFile) { Get-Content $outFile }
+                Write-Host "---- STDERR ($bin) ----"
+                if (Test-Path $errFile) { Get-Content $errFile }
+                throw "Smoke test failed for $bin with exit code $code"
+              }
+            } else {
+              Stop-Process -Id $proc.Id -Force
+              Wait-Process -Id $proc.Id -ErrorAction SilentlyContinue
+              Write-Host "$bin stayed alive for 5s; terminated intentionally."
+            }
+          }
+
+      - name: Smoke test executables (non-Windows)
+        if: ${{ matrix.os != 'windows-latest' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+
+          client_bin="MasterDnsVPN_Client_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+          server_bin="MasterDnsVPN_Server_${{ matrix.platform }}_${{ matrix.arch }}${{ matrix.ext }}"
+
+          for bin in "$client_bin" "$server_bin"; do
+            if [ ! -f "$bin" ]; then
+              echo "Smoke test target not found: $bin" >&2
+              exit 1
+            fi
+
+            chmod +x "$bin" || true
+            echo "Smoke testing $bin ..."
+            out_file="$bin.smoke.out"
+            err_file="$bin.smoke.err"
+
+            "./$bin" >"$out_file" 2>"$err_file" &
+            pid=$!
+            sleep 5
+
+            if kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+              echo "$bin stayed alive for 5s; terminated intentionally."
+            else
+              set +e
+              wait "$pid"
+              code=$?
+              set -e
+              echo "$bin exited early with code $code"
+              if [ "$code" -ne 0 ]; then
+                echo "---- STDOUT ($bin) ----"
+                cat "$out_file" || true
+                echo "---- STDERR ($bin) ----"
+                cat "$err_file" || true
+                exit 1
+              fi
+            fi
+          done
+
       - name: Package artifacts (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
         shell: powershell
