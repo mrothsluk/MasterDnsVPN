@@ -842,16 +842,12 @@ class MasterDnsVPNServer(PacketQueueMixin):
         """Handle STREAM_SYN packets without blocking current response."""
         await self._handle_stream_syn(session_id, stream_id, sn)
 
-    def _map_socks5_rep_to_packet(self, rep_code: int) -> int:
-        """Map SOCKS5 REP code to Packet_Type."""
-        return self._socks5_rep_packet_map.get(
-            int(rep_code), Packet_Type.SOCKS5_CONNECT_FAIL
-        )
-
     def _map_socks5_exception_to_packet(self, exc: Exception) -> int:
         """Best-effort exception to SOCKS5 result packet mapping."""
         if isinstance(exc, Socks5ConnectError):
-            return self._map_socks5_rep_to_packet(exc.rep_code)
+            return self._socks5_rep_packet_map.get(
+                int(exc.rep_code), Packet_Type.SOCKS5_CONNECT_FAIL
+            )
 
         if isinstance(exc, asyncio.TimeoutError):
             return Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE
@@ -1236,6 +1232,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         session = self.sessions.get(session_id)
         if not session:
             return
+
         stream_data = session.get("streams", {}).get(stream_id)
         if not stream_data:
             await self.close_stream(session_id, stream_id, reason="Client sent FIN")
@@ -1243,6 +1240,30 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         arq = stream_data.get("arq_obj")
         if not arq:
+            await self._enqueue_packet(
+                session_id,
+                0,
+                stream_id,
+                sn,
+                Packet_Type.STREAM_FIN_ACK,
+                b"FA" + os.urandom(4),
+            )
+            return
+
+        # If FIN was already processed and its ACK may have been lost, re-ACK duplicate
+        # FIN packets while the stream is still alive and not yet moved to closed_streams.
+        if (
+            getattr(arq, "_remote_write_closed", False)
+            and getattr(arq, "_fin_seq_received", None) == sn
+        ):
+            await self._enqueue_packet(
+                session_id,
+                0,
+                stream_id,
+                sn,
+                Packet_Type.STREAM_FIN_ACK,
+                b"FA" + os.urandom(4),
+            )
             return
 
         if getattr(arq, "_fin_sent", False) and getattr(arq, "_fin_acked", False):
@@ -1286,6 +1307,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         session = self.sessions.get(session_id)
         if not session:
             return
+
         stream_data = session.get("streams", {}).get(stream_id)
         if not stream_data:
             return
@@ -1305,6 +1327,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         session = self.sessions.get(session_id)
         if not session:
             return
+
         stream_data = session.get("streams", {}).get(stream_id)
         if not stream_data:
             return
