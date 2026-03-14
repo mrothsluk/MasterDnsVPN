@@ -89,12 +89,12 @@ DOWNLOAD_COMPRESSION_TYPE = 0
 # Minimum accepted MTU values during resolver validation (0 disables each bound).
 # Please set these according to your network conditions.
 # Note: The software will suggest the best MTUs for you based on your domain.
-MIN_UPLOAD_MTU = 100
-MIN_DOWNLOAD_MTU = 100
+MIN_UPLOAD_MTU = 70
+MIN_DOWNLOAD_MTU = 150
 
 # Initial upper bounds for MTU probing.
 # Note: The software will suggest the best MTUs for you based on your domain.
-MAX_UPLOAD_MTU = 220
+MAX_UPLOAD_MTU = 150
 MAX_DOWNLOAD_MTU = 200
 
 # MTU test aggressiveness.
@@ -176,7 +176,7 @@ MAX_CONNECTION_ATTEMPTS = 10
 
 # Data-plane ARQ settings.
 # Rediuce ARQ_WINDOW_SIZE if your RAM is limited or if you have very high MTUs and want to reduce memory usage.
-ARQ_WINDOW_SIZE = 1000
+ARQ_WINDOW_SIZE = 500
 ARQ_INITIAL_RTO = 0.2
 ARQ_MAX_RTO = 1.0
 
