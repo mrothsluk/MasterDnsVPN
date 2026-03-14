@@ -107,6 +107,8 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self.socks5_auth: bool = self.config.get("SOCKS5_AUTH", False)
         self.socks5_user: str = str(self.config.get("SOCKS5_USER", ""))
         self.socks5_pass: str = str(self.config.get("SOCKS5_PASS", ""))
+        self.socks5_user_bytes: bytes = self.socks5_user.encode("utf-8")
+        self.socks5_pass_bytes: bytes = self.socks5_pass.encode("utf-8")
 
         if self.protocol_type not in ("SOCKS5", "TCP"):
             self.logger.error(
@@ -141,6 +143,15 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
         self.max_packets_per_batch = int(self.config.get("MAX_PACKETS_PER_BATCH", 1000))
         self.arq_window_size = int(self.config.get("ARQ_WINDOW_SIZE", 300))
+        self.arq_initial_rto = float(self.config.get("ARQ_INITIAL_RTO", 0.8))
+        self.arq_max_rto = float(self.config.get("ARQ_MAX_RTO", 1.5))
+        self.arq_control_initial_rto = float(
+            self.config.get("ARQ_CONTROL_INITIAL_RTO", 0.8)
+        )
+        self.arq_control_max_rto = float(self.config.get("ARQ_CONTROL_MAX_RTO", 2.5))
+        self.arq_control_max_retries = int(
+            self.config.get("ARQ_CONTROL_MAX_RETRIES", 40)
+        )
         self.session_timeout = int(self.config.get("SESSION_TIMEOUT", 300))
         self.session_cleanup_interval = int(
             self.config.get("SESSION_CLEANUP_INTERVAL", 30)
@@ -1872,6 +1883,12 @@ class MasterDnsVPNServer(PacketQueueMixin):
         if not stream_data:
             return
 
+        use_external_socks5 = self.use_external_socks5
+        forward_ip = self.forward_ip
+        forward_port = self.forward_port
+        socks5_auth = self.socks5_auth
+        logger = self.logger
+
         try:
             if not target_payload or len(target_payload) < 3:
                 raise Socks5ConnectError(0x01, "Invalid SOCKS5 target payload")
@@ -1911,15 +1928,15 @@ class MasterDnsVPNServer(PacketQueueMixin):
             target_port = struct.unpack(">H", target_payload[offset : offset + 2])[0]
 
             async def _connect_and_handshake():
-                if getattr(self, "use_external_socks5", False):
-                    self.logger.debug(
-                        f"<green>Forwarding to External SOCKS5 <blue>{self.forward_ip}:{self.forward_port}</blue> for target <cyan>{target_ip}:{target_port}</cyan> (Stream {stream_id})</green>"
+                if use_external_socks5:
+                    logger.debug(
+                        f"<green>Forwarding to External SOCKS5 <blue>{forward_ip}:{forward_port}</blue> for target <cyan>{target_ip}:{target_port}</cyan> (Stream {stream_id})</green>"
                     )
                     c_reader, c_writer = await asyncio.open_connection(
-                        self.forward_ip, self.forward_port
+                        forward_ip, forward_port
                     )
 
-                    if self.socks5_auth:
+                    if socks5_auth:
                         c_writer.write(b"\x05\x01\x02")
                     else:
                         c_writer.write(b"\x05\x01\x00")
@@ -1929,9 +1946,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
                     if greeting_res[0] != 0x05:
                         raise ValueError("Upstream proxy is not a valid SOCKS5 server")
 
-                    if self.socks5_auth and greeting_res[1] == 0x02:
-                        u_bytes = self.socks5_user.encode("utf-8")
-                        p_bytes = self.socks5_pass.encode("utf-8")
+                    if socks5_auth and greeting_res[1] == 0x02:
+                        u_bytes = self.socks5_user_bytes
+                        p_bytes = self.socks5_pass_bytes
                         auth_req = (
                             b"\x01"
                             + bytes([len(u_bytes)])
@@ -1972,7 +1989,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
 
                     return c_reader, c_writer
                 else:
-                    self.logger.debug(
+                    logger.debug(
                         f"<green>SOCKS5 Fast-Connecting directly to <blue>{target_ip}:{target_port}</blue> for stream <cyan>{stream_id}</cyan></green>"
                     )
                     return await asyncio.open_connection(target_ip, target_port)
@@ -2004,14 +2021,14 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 reader=reader,
                 writer=writer,
                 mtu=session.get("download_mtu", 50),
-                logger=self.logger,
+                logger=logger,
                 window_size=self.arq_window_size,
-                rto=float(self.config.get("ARQ_INITIAL_RTO", 0.8)),
-                max_rto=float(self.config.get("ARQ_MAX_RTO", 1.5)),
+                rto=self.arq_initial_rto,
+                max_rto=self.arq_max_rto,
                 enable_control_reliability=True,
-                control_rto=float(self.config.get("ARQ_CONTROL_INITIAL_RTO", 0.8)),
-                control_max_rto=float(self.config.get("ARQ_CONTROL_MAX_RTO", 2.5)),
-                control_max_retries=int(self.config.get("ARQ_CONTROL_MAX_RETRIES", 40)),
+                control_rto=self.arq_control_initial_rto,
+                control_max_rto=self.arq_control_max_rto,
+                control_max_retries=self.arq_control_max_retries,
             )
 
             # SOCKS5_SYN is handled on control-plane now, so ARQ data-plane
@@ -2679,12 +2696,12 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 mtu=session.get("download_mtu", 50),
                 logger=self.logger,
                 window_size=self.arq_window_size,
-                rto=float(self.config.get("ARQ_INITIAL_RTO", 0.8)),
-                max_rto=float(self.config.get("ARQ_MAX_RTO", 1.5)),
+                rto=self.arq_initial_rto,
+                max_rto=self.arq_max_rto,
                 enable_control_reliability=True,
-                control_rto=float(self.config.get("ARQ_CONTROL_INITIAL_RTO", 0.8)),
-                control_max_rto=float(self.config.get("ARQ_CONTROL_MAX_RTO", 2.5)),
-                control_max_retries=int(self.config.get("ARQ_CONTROL_MAX_RETRIES", 40)),
+                control_rto=self.arq_control_initial_rto,
+                control_max_rto=self.arq_control_max_rto,
+                control_max_retries=self.arq_control_max_retries,
             )
 
             stream_data["arq_obj"] = stream
