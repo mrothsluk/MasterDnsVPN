@@ -21,6 +21,7 @@ import (
 var (
 	ErrTXTAnswerMissing   = errors.New("dns txt answer missing")
 	ErrTXTAnswerMalformed = errors.New("dns txt answer malformed")
+	ErrTXTAnswerTooLarge  = errors.New("dns txt answer too large")
 )
 
 const (
@@ -89,8 +90,13 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 	}
 
 	answerLen := 0
-	for _, payload := range answerPayloads {
-		answerLen += len(nameBytes) + 10 + len(payload)
+	useAnswerNameCompression := len(answerPayloads) > 1
+	for i, payload := range answerPayloads {
+		nameLen := len(nameBytes)
+		if useAnswerNameCompression && i > 0 {
+			nameLen = 2
+		}
+		answerLen += nameLen + 10 + len(payload)
 	}
 
 	response := make([]byte, dnsHeaderSize+len(questionBytes)+answerLen+rawRecordsLen(optRecords))
@@ -103,9 +109,15 @@ func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayl
 
 	offset := dnsHeaderSize
 	offset += copy(response[offset:], questionBytes)
+	firstAnswerNameOffset := offset
 
-	for _, payload := range answerPayloads {
-		offset += copy(response[offset:], nameBytes)
+	for i, payload := range answerPayloads {
+		if useAnswerNameCompression && i > 0 && firstAnswerNameOffset <= 0x3FFF {
+			binary.BigEndian.PutUint16(response[offset:offset+2], uint16(0xC000|firstAnswerNameOffset))
+			offset += 2
+		} else {
+			offset += copy(response[offset:], nameBytes)
+		}
 		binary.BigEndian.PutUint16(response[offset:offset+2], enums.DNSRecordTypeTXT)
 		binary.BigEndian.PutUint16(response[offset+2:offset+4], enums.DNSQClassIN)
 		binary.BigEndian.PutUint32(response[offset+4:offset+8], 0)
@@ -137,7 +149,10 @@ func BuildVPNResponsePacket(questionPacket []byte, answerName string, packet vpn
 		return nil, err
 	}
 
-	answerPayloads := buildTXTAnswerChunks(rawFrame, baseEncode)
+	answerPayloads, err := buildTXTAnswerChunks(rawFrame, baseEncode)
+	if err != nil {
+		return nil, err
+	}
 	return BuildTXTResponsePacket(questionPacket, answerName, answerPayloads)
 }
 
@@ -212,14 +227,14 @@ func BuildTunnelQuestionName(domain string, encodedFrame string) (string, error)
 	return name, nil
 }
 
-func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) [][]byte {
+func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) ([][]byte, error) {
 	maxChunk := maxTXTAnswerPayload
 	if baseEncode {
 		maxChunk = maxTXTEncodedChunk
 	}
 
 	if len(rawFrame) == 0 {
-		return [][]byte{appendLengthPrefixedTXT(nil)}
+		return [][]byte{appendLengthPrefixedTXT(nil)}, nil
 	}
 
 	encodeChunk := func(raw []byte) []byte {
@@ -231,12 +246,12 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) [][]byte {
 	}
 
 	if len(rawFrame) <= maxChunk {
-		return [][]byte{encodeChunk(rawFrame)}
+		return [][]byte{encodeChunk(rawFrame)}, nil
 	}
 
 	header, err := vpnproto.Parse(rawFrame)
 	if err != nil {
-		return [][]byte{encodeChunk(rawFrame)}
+		return [][]byte{encodeChunk(rawFrame)}, nil
 	}
 
 	headerLen := header.HeaderLength
@@ -251,6 +266,9 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) [][]byte {
 	totalChunks := 1
 	if remaining > 0 {
 		totalChunks += (remaining + maxChunkNData - 1) / maxChunkNData
+	}
+	if totalChunks > 255 {
+		return nil, ErrTXTAnswerTooLarge
 	}
 
 	chunks := make([][]byte, 0, totalChunks)
@@ -273,7 +291,7 @@ func buildTXTAnswerChunks(rawFrame []byte, baseEncode bool) [][]byte {
 		cursor = end
 	}
 
-	return chunks
+	return chunks, nil
 }
 
 func appendLengthPrefixedTXT(data []byte) []byte {
@@ -351,8 +369,9 @@ func assembleVPNResponse(rawAnswers [][]byte, baseEncoded bool) (vpnproto.Packet
 		return vpnproto.Parse(raw)
 	}
 
-	chunks := make(map[int][]byte, len(rawAnswers))
+	var chunks [256][]byte
 	totalExpected := 0
+	seenChunks := 0
 	var header vpnproto.Packet
 	headerSeen := false
 
@@ -373,35 +392,53 @@ func assembleVPNResponse(rawAnswers [][]byte, baseEncoded bool) (vpnproto.Packet
 				return vpnproto.Packet{}, ErrTXTAnswerMalformed
 			}
 			totalExpected = int(raw[1])
+			if totalExpected <= 0 || totalExpected > len(chunks) {
+				return vpnproto.Packet{}, ErrTXTAnswerMalformed
+			}
 			parsed, err := vpnproto.ParseAtOffset(raw, 2)
 			if err != nil {
 				return vpnproto.Packet{}, err
 			}
 			header = parsed
 			headerSeen = true
+			if chunks[0] == nil {
+				seenChunks++
+			}
 			chunks[0] = parsed.Payload
 			continue
 		}
 
-		chunks[int(raw[0])] = raw[1:]
+		chunkID := int(raw[0])
+		if chunkID >= len(chunks) {
+			return vpnproto.Packet{}, ErrTXTAnswerMalformed
+		}
+		if chunks[chunkID] == nil {
+			seenChunks++
+		}
+		chunks[chunkID] = raw[1:]
 	}
 
-	if !headerSeen || totalExpected <= 0 || len(chunks) != totalExpected {
+	if !headerSeen || totalExpected <= 0 || seenChunks != totalExpected {
 		return vpnproto.Packet{}, ErrTXTAnswerMalformed
 	}
-	for i := 0; i < totalExpected; i++ {
-		if _, ok := chunks[i]; !ok {
+	for i := range totalExpected {
+		if chunks[i] == nil {
+			return vpnproto.Packet{}, ErrTXTAnswerMalformed
+		}
+	}
+	for i := totalExpected; i < len(chunks); i++ {
+		if chunks[i] != nil {
 			return vpnproto.Packet{}, ErrTXTAnswerMalformed
 		}
 	}
 
 	payloadLen := 0
-	for i := 0; i < totalExpected; i++ {
+	for i := range totalExpected {
 		payloadLen += len(chunks[i])
 	}
 
 	payload := make([]byte, 0, payloadLen)
-	for i := 0; i < totalExpected; i++ {
+	for i := range totalExpected {
 		payload = append(payload, chunks[i]...)
 	}
 	header.Payload = payload
