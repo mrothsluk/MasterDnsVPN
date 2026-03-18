@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
+	"masterdnsvpn-go/internal/dnscache"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
 )
@@ -23,9 +25,11 @@ type Client struct {
 	log      *logger.Logger
 	codec    *security.Codec
 	balancer *Balancer
+	now      func() time.Time
 
 	connections      []Connection
 	connectionsByKey map[string]int
+	localDNSCache    *dnscache.Store
 
 	successMTUChecks    bool
 	sessionID           uint8
@@ -73,6 +77,12 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		codec:            codec,
 		balancer:         NewBalancer(cfg.ResolverBalancingStrategy),
 		connectionsByKey: make(map[string]int, len(cfg.Domains)*len(cfg.Resolvers)),
+		now:              time.Now,
+		localDNSCache: dnscache.New(
+			cfg.LocalDNSCacheMaxRecords,
+			time.Duration(cfg.LocalDNSCacheTTLSeconds*float64(time.Second)),
+			time.Duration(cfg.LocalDNSPendingTimeoutSec*float64(time.Second)),
+		),
 	}
 	c.ResetRuntimeState(true)
 	c.uploadCompression = uint8(cfg.UploadCompressionType)
@@ -94,6 +104,10 @@ func (c *Client) Codec() *security.Codec {
 
 func (c *Client) Balancer() *Balancer {
 	return c.balancer
+}
+
+func (c *Client) LocalDNSCache() *dnscache.Store {
+	return c.localDNSCache
 }
 
 func (c *Client) Connections() []Connection {

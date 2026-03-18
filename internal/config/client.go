@@ -29,6 +29,11 @@ type ClientConfig struct {
 	LocalDNSPort              int               `toml:"LOCAL_DNS_PORT"`
 	LocalDNSWorkers           int               `toml:"LOCAL_DNS_WORKERS"`
 	LocalDNSQueueSize         int               `toml:"LOCAL_DNS_QUEUE_SIZE"`
+	LocalDNSCacheMaxRecords   int               `toml:"LOCAL_DNS_CACHE_MAX_RECORDS"`
+	LocalDNSCacheTTLSeconds   float64           `toml:"LOCAL_DNS_CACHE_TTL_SECONDS"`
+	LocalDNSPendingTimeoutSec float64           `toml:"LOCAL_DNS_PENDING_TIMEOUT_SECONDS"`
+	LocalDNSCachePersist      bool              `toml:"LOCAL_DNS_CACHE_PERSIST_TO_FILE"`
+	LocalDNSCacheFlushSec     float64           `toml:"LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS"`
 	ResolverBalancingStrategy int               `toml:"RESOLVER_BALANCING_STRATEGY"`
 	BaseEncodeData            bool              `toml:"BASE_ENCODE_DATA"`
 	UploadCompressionType     int               `toml:"UPLOAD_COMPRESSION_TYPE"`
@@ -57,6 +62,11 @@ func defaultClientConfig() ClientConfig {
 		LocalDNSPort:              5353,
 		LocalDNSWorkers:           2,
 		LocalDNSQueueSize:         512,
+		LocalDNSCacheMaxRecords:   2000,
+		LocalDNSCacheTTLSeconds:   3600.0,
+		LocalDNSPendingTimeoutSec: 30.0,
+		LocalDNSCachePersist:      true,
+		LocalDNSCacheFlushSec:     60.0,
 		ResolverBalancingStrategy: 0,
 		BaseEncodeData:            false,
 		UploadCompressionType:     compression.TypeOff,
@@ -122,6 +132,18 @@ func LoadClientConfig(filename string) (ClientConfig, error) {
 	if cfg.LocalDNSQueueSize < 1 {
 		cfg.LocalDNSQueueSize = 512
 	}
+	if cfg.LocalDNSCacheMaxRecords < 1 {
+		cfg.LocalDNSCacheMaxRecords = 2000
+	}
+	if cfg.LocalDNSCacheTTLSeconds <= 0 {
+		cfg.LocalDNSCacheTTLSeconds = 3600.0
+	}
+	if cfg.LocalDNSPendingTimeoutSec <= 0 {
+		cfg.LocalDNSPendingTimeoutSec = 30.0
+	}
+	if cfg.LocalDNSCacheFlushSec <= 0 {
+		cfg.LocalDNSCacheFlushSec = 60.0
+	}
 	if cfg.UploadCompressionType < compression.TypeOff || cfg.UploadCompressionType > compression.TypeZLIB {
 		return cfg, fmt.Errorf("invalid UPLOAD_COMPRESSION_TYPE: %d", cfg.UploadCompressionType)
 	}
@@ -174,6 +196,10 @@ func LoadClientConfig(filename string) (ClientConfig, error) {
 
 func (c ClientConfig) ResolversPath() string {
 	return filepath.Join(c.ConfigDir, "client_resolvers.txt")
+}
+
+func (c ClientConfig) LocalDNSCachePath() string {
+	return filepath.Join(c.ConfigDir, "local_dns_cache.json")
 }
 
 func normalizeClientDomains(domains []string) []string {

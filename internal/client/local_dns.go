@@ -25,6 +25,8 @@ func (c *Client) RunLocalDNSListener(ctx context.Context) error {
 		return nil
 	}
 
+	c.loadLocalDNSCache()
+
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{
 		IP:   net.ParseIP(c.cfg.LocalDNSIP),
 		Port: c.cfg.LocalDNSPort,
@@ -55,6 +57,7 @@ func (c *Client) RunLocalDNSListener(ctx context.Context) error {
 		<-ctx.Done()
 		_ = conn.Close()
 	}()
+	go c.runLocalDNSCacheFlushLoop(ctx)
 
 	buffer := make([]byte, EDnsSafeUDPSize)
 	for {
@@ -74,8 +77,8 @@ func (c *Client) RunLocalDNSListener(ctx context.Context) error {
 			workerWG.Wait()
 			return nil
 		default:
-			response, responseErr := DnsParser.BuildRefusedResponse(packet)
-			if responseErr == nil {
+			response, _ := DnsParser.BuildServerFailureResponse(packet)
+			if len(response) != 0 {
 				_, _ = conn.WriteToUDP(response, addr)
 			}
 		}
@@ -95,10 +98,17 @@ func (c *Client) localDNSWorker(ctx context.Context, conn *net.UDPConn, queue <-
 			if !ok {
 				return
 			}
-			response, err := DnsParser.BuildRefusedResponse(req.packet)
-			if err == nil {
-				_, _ = conn.WriteToUDP(response, req.addr)
-			}
+			func() {
+				defer func() {
+					if recover() != nil {
+						return
+					}
+				}()
+				response, _ := c.handleDNSQueryPacket(req.packet)
+				if len(response) != 0 {
+					_, _ = conn.WriteToUDP(response, req.addr)
+				}
+			}()
 		}
 	}
 }

@@ -10,9 +10,11 @@ package client
 import (
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
+	"masterdnsvpn-go/internal/dnscache"
 	Enums "masterdnsvpn-go/internal/enums"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -234,4 +236,117 @@ func TestNewKeepsLocalDNSDefaults(t *testing.T) {
 	if c.cfg.LocalDNSIP != "127.0.0.1" || c.cfg.LocalDNSPort != 5353 {
 		t.Fatalf("unexpected local dns bind config: %s:%d", c.cfg.LocalDNSIP, c.cfg.LocalDNSPort)
 	}
+}
+
+func TestHandleDNSQueryPacketCreatesPendingEntry(t *testing.T) {
+	c := New(config.ClientConfig{
+		LocalDNSCacheMaxRecords:   8,
+		LocalDNSCacheTTLSeconds:   60,
+		LocalDNSPendingTimeoutSec: 30,
+	}, nil, nil)
+	now := time.Unix(1700000000, 0)
+	c.now = func() time.Time { return now }
+
+	query := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	response, dispatch := c.handleDNSQueryPacket(query)
+	if dispatch == nil {
+		t.Fatal("expected pending dispatch request")
+	}
+	if len(response) == 0 {
+		t.Fatal("expected temporary servfail response")
+	}
+	cacheKey := dnscache.BuildKey("example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	entry, ok := c.LocalDNSCache().Snapshot(cacheKey)
+	if !ok {
+		t.Fatal("expected cache entry to be created")
+	}
+	if entry.Status != dnscache.StatusPending {
+		t.Fatalf("expected pending cache status, got=%d", entry.Status)
+	}
+}
+
+func TestHandleDNSQueryPacketUsesReadyCache(t *testing.T) {
+	c := New(config.ClientConfig{
+		LocalDNSCacheMaxRecords:   8,
+		LocalDNSCacheTTLSeconds:   60,
+		LocalDNSPendingTimeoutSec: 30,
+	}, nil, nil)
+	now := time.Unix(1700000000, 0)
+	c.now = func() time.Time { return now }
+
+	query := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	cacheKey := dnscache.BuildKey("example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	rawResponse := []byte{
+		0x00, 0x00, 0x81, 0x80, 0x00, 0x01, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+	}
+	rawResponse = append(rawResponse, encodeClientTestDNSName("example.com")...)
+	rawResponse = append(rawResponse, 0x00, byte(Enums.DNS_RECORD_TYPE_A), 0x00, byte(Enums.DNSQ_CLASS_IN))
+	c.LocalDNSCache().SetReady(cacheKey, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN, rawResponse, now)
+
+	response, dispatch := c.handleDNSQueryPacket(query)
+	if dispatch != nil {
+		t.Fatal("did not expect dispatch for ready cache hit")
+	}
+	if len(response) < 2 {
+		t.Fatal("expected cached response")
+	}
+	if binary.BigEndian.Uint16(response[:2]) != 0x1234 {
+		t.Fatalf("expected patched response id, got=%#x", binary.BigEndian.Uint16(response[:2]))
+	}
+}
+
+func TestHandleDNSQueryPacketRejectsMalformedQuery(t *testing.T) {
+	c := New(config.ClientConfig{}, nil, nil)
+	response, dispatch := c.handleDNSQueryPacket([]byte{0x12, 0x34, 0x00})
+	if dispatch != nil {
+		t.Fatal("did not expect dispatch for malformed query")
+	}
+	if response != nil {
+		t.Fatal("short non-dns packet should be ignored")
+	}
+
+	query := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
+	query = query[:len(query)-2]
+	response, dispatch = c.handleDNSQueryPacket(query)
+	if dispatch != nil {
+		t.Fatal("did not expect dispatch for malformed dns query")
+	}
+	if len(response) == 0 {
+		t.Fatal("expected format error response for malformed dns query")
+	}
+}
+
+func buildClientTestDNSQuery(id uint16, name string, qType uint16, qClass uint16) []byte {
+	packet := []byte{
+		byte(id >> 8), byte(id),
+		0x01, 0x00,
+		0x00, 0x01,
+		0x00, 0x00,
+		0x00, 0x00,
+		0x00, 0x00,
+	}
+	packet = append(packet, encodeClientTestDNSName(name)...)
+	packet = append(packet, byte(qType>>8), byte(qType), byte(qClass>>8), byte(qClass))
+	return packet
+}
+
+func encodeClientTestDNSName(name string) []byte {
+	if name == "" {
+		return []byte{0x00}
+	}
+
+	encoded := make([]byte, 0, len(name)+2)
+	labelStart := 0
+	for i := 0; i <= len(name); i++ {
+		if i < len(name) && name[i] != '.' {
+			continue
+		}
+		label := name[labelStart:i]
+		encoded = append(encoded, byte(len(label)))
+		encoded = append(encoded, label...)
+		labelStart = i + 1
+	}
+	encoded = append(encoded, 0x00)
+	return encoded
 }
