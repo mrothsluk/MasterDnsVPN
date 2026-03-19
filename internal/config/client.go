@@ -28,6 +28,9 @@ type ClientConfig struct {
 	LocalSOCKS5IP             string            `toml:"LOCAL_SOCKS5_IP"`
 	LocalSOCKS5Port           int               `toml:"LOCAL_SOCKS5_PORT"`
 	LocalSOCKS5HandshakeSec   float64           `toml:"LOCAL_SOCKS5_HANDSHAKE_TIMEOUT_SECONDS"`
+	SOCKS5Auth                bool              `toml:"SOCKS5_AUTH"`
+	SOCKS5User                string            `toml:"SOCKS5_USER"`
+	SOCKS5Pass                string            `toml:"SOCKS5_PASS"`
 	LocalDNSEnabled           bool              `toml:"LOCAL_DNS_ENABLED"`
 	LocalDNSIP                string            `toml:"LOCAL_DNS_IP"`
 	LocalDNSPort              int               `toml:"LOCAL_DNS_PORT"`
@@ -67,6 +70,9 @@ func defaultClientConfig() ClientConfig {
 		LocalSOCKS5IP:             "127.0.0.1",
 		LocalSOCKS5Port:           1080,
 		LocalSOCKS5HandshakeSec:   10.0,
+		SOCKS5Auth:                false,
+		SOCKS5User:                "",
+		SOCKS5Pass:                "",
 		LocalDNSEnabled:           false,
 		LocalDNSIP:                "127.0.0.1",
 		LocalDNSPort:              5353,
@@ -140,6 +146,15 @@ func LoadClientConfig(filename string) (ClientConfig, error) {
 	}
 	if cfg.LocalSOCKS5HandshakeSec <= 0 {
 		cfg.LocalSOCKS5HandshakeSec = 10.0
+	}
+	if len(cfg.SOCKS5User) > 255 {
+		return cfg, fmt.Errorf("SOCKS5_USER cannot exceed 255 bytes")
+	}
+	if len(cfg.SOCKS5Pass) > 255 {
+		return cfg, fmt.Errorf("SOCKS5_PASS cannot exceed 255 bytes")
+	}
+	if cfg.SOCKS5Auth && (cfg.SOCKS5User == "" || cfg.SOCKS5Pass == "") {
+		return cfg, fmt.Errorf("SOCKS5_AUTH requires both SOCKS5_USER and SOCKS5_PASS")
 	}
 	cfg.LocalDNSIP = strings.TrimSpace(cfg.LocalDNSIP)
 	if cfg.LocalDNSIP == "" {

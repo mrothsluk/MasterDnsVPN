@@ -20,6 +20,7 @@ import (
 )
 
 var errSOCKS5UnsupportedCommand = errors.New("unsupported socks5 command")
+var errSOCKS5AuthFailed = errors.New("socks5 authentication failed")
 
 type socks5HandshakeRequest struct {
 	Command       byte
@@ -83,9 +84,11 @@ func (c *Client) handleLocalSOCKS5Conn(conn net.Conn) {
 	}
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
-	request, err := performSOCKS5Handshake(conn)
+	request, err := c.performSOCKS5Handshake(conn)
 	if err != nil {
-		_ = writeSOCKS5Failure(conn, 0x07)
+		if !errors.Is(err, errSOCKS5AuthFailed) {
+			_ = writeSOCKS5Failure(conn, 0x07)
+		}
 		return
 	}
 
@@ -117,7 +120,7 @@ func (c *Client) handleLocalSOCKS5Conn(conn net.Conn) {
 	}
 }
 
-func performSOCKS5Handshake(conn net.Conn) (socks5HandshakeRequest, error) {
+func (c *Client) performSOCKS5Handshake(conn net.Conn) (socks5HandshakeRequest, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		return socks5HandshakeRequest{}, err
@@ -131,18 +134,34 @@ func performSOCKS5Handshake(conn net.Conn) (socks5HandshakeRequest, error) {
 		return socks5HandshakeRequest{}, err
 	}
 	supportsNoAuth := false
+	supportsUserPass := false
 	for _, method := range methods {
-		if method == 0x00 {
+		switch method {
+		case 0x00:
 			supportsNoAuth = true
-			break
+		case 0x02:
+			supportsUserPass = true
 		}
 	}
-	if !supportsNoAuth {
+
+	if c != nil && c.cfg.SOCKS5Auth {
+		if !supportsUserPass {
+			_, _ = conn.Write([]byte{0x05, 0xFF})
+			return socks5HandshakeRequest{}, errSOCKS5UnsupportedCommand
+		}
+		if _, err := conn.Write([]byte{0x05, 0x02}); err != nil {
+			return socks5HandshakeRequest{}, err
+		}
+		if err := c.handleSOCKS5UserPassAuth(conn); err != nil {
+			return socks5HandshakeRequest{}, err
+		}
+	} else if !supportsNoAuth {
 		_, _ = conn.Write([]byte{0x05, 0xFF})
 		return socks5HandshakeRequest{}, errSOCKS5UnsupportedCommand
-	}
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-		return socks5HandshakeRequest{}, err
+	} else {
+		if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+			return socks5HandshakeRequest{}, err
+		}
 	}
 
 	requestHeader := make([]byte, 4)
@@ -164,6 +183,48 @@ func performSOCKS5Handshake(conn net.Conn) (socks5HandshakeRequest, error) {
 		Command:       requestHeader[1],
 		TargetPayload: payload,
 	}, nil
+}
+
+func (c *Client) handleSOCKS5UserPassAuth(conn net.Conn) error {
+	if c == nil || conn == nil {
+		return errSOCKS5UnsupportedCommand
+	}
+
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return err
+	}
+	if header[0] != 0x01 || header[1] == 0 {
+		_, _ = conn.Write([]byte{0x01, 0x01})
+		return errSOCKS5AuthFailed
+	}
+
+	user := make([]byte, int(header[1]))
+	if _, err := io.ReadFull(conn, user); err != nil {
+		return err
+	}
+
+	passLen := make([]byte, 1)
+	if _, err := io.ReadFull(conn, passLen); err != nil {
+		return err
+	}
+	if passLen[0] == 0 {
+		_, _ = conn.Write([]byte{0x01, 0x01})
+		return errSOCKS5AuthFailed
+	}
+
+	pass := make([]byte, int(passLen[0]))
+	if _, err := io.ReadFull(conn, pass); err != nil {
+		return err
+	}
+
+	if string(user) != c.cfg.SOCKS5User || string(pass) != c.cfg.SOCKS5Pass {
+		_, _ = conn.Write([]byte{0x01, 0x01})
+		return errSOCKS5AuthFailed
+	}
+
+	_, err := conn.Write([]byte{0x01, 0x00})
+	return err
 }
 
 func readSOCKS5TargetPayload(conn net.Conn, atyp byte) ([]byte, error) {
@@ -214,6 +275,8 @@ func mapSOCKS5FailureReply(err error) byte {
 	switch {
 	case errors.Is(err, errSOCKS5UnsupportedCommand):
 		return 0x07
+	case errors.Is(err, errSOCKS5AuthFailed):
+		return 0x01
 	case errors.Is(err, SocksProto.ErrUnsupportedAddressType):
 		return 0x08
 	default:

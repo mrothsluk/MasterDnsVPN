@@ -978,11 +978,12 @@ func TestPerformSOCKS5HandshakeParsesConnectRequest(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
+	c := New(config.ClientConfig{}, nil, nil)
 
 	done := make(chan error, 1)
 	go func() {
 		defer close(done)
-		request, err := performSOCKS5Handshake(serverConn)
+		request, err := c.performSOCKS5Handshake(serverConn)
 		if err != nil {
 			done <- err
 			return
@@ -1022,11 +1023,12 @@ func TestPerformSOCKS5HandshakeParsesUDPAssociateRequest(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
+	c := New(config.ClientConfig{}, nil, nil)
 
 	done := make(chan error, 1)
 	go func() {
 		defer close(done)
-		request, err := performSOCKS5Handshake(serverConn)
+		request, err := c.performSOCKS5Handshake(serverConn)
 		if err != nil {
 			done <- err
 			return
@@ -1056,6 +1058,104 @@ func TestPerformSOCKS5HandshakeParsesUDPAssociateRequest(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("performSOCKS5Handshake returned error: %v", err)
+	}
+}
+
+func TestPerformSOCKS5HandshakeAuthenticatesUserPass(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := New(config.ClientConfig{
+		SOCKS5Auth: true,
+		SOCKS5User: "user",
+		SOCKS5Pass: "pass",
+	}, nil, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		request, err := c.performSOCKS5Handshake(serverConn)
+		if err != nil {
+			done <- err
+			return
+		}
+		if request.Command != 0x01 {
+			done <- errors.New("unexpected socks5 command")
+			return
+		}
+		done <- nil
+	}()
+
+	if _, err := clientConn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("ReadFull returned error: %v", err)
+	}
+	if string(reply) != string([]byte{0x05, 0x02}) {
+		t.Fatalf("unexpected method selection reply: %v", reply)
+	}
+	authRequest := []byte{0x01, 0x04, 'u', 's', 'e', 'r', 0x04, 'p', 'a', 's', 's'}
+	if _, err := clientConn.Write(authRequest); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("ReadFull returned error: %v", err)
+	}
+	if string(reply) != string([]byte{0x01, 0x00}) {
+		t.Fatalf("unexpected auth reply: %v", reply)
+	}
+	request := []byte{0x05, 0x01, 0x00, 0x03, 0x0B, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm', 0x01, 0xBB}
+	if _, err := clientConn.Write(request); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("performSOCKS5Handshake returned error: %v", err)
+	}
+}
+
+func TestPerformSOCKS5HandshakeRejectsInvalidCredentials(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	c := New(config.ClientConfig{
+		SOCKS5Auth: true,
+		SOCKS5User: "user",
+		SOCKS5Pass: "pass",
+	}, nil, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		_, err := c.performSOCKS5Handshake(serverConn)
+		done <- err
+	}()
+
+	if _, err := clientConn.Write([]byte{0x05, 0x01, 0x02}); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("ReadFull returned error: %v", err)
+	}
+	if string(reply) != string([]byte{0x05, 0x02}) {
+		t.Fatalf("unexpected method selection reply: %v", reply)
+	}
+	authRequest := []byte{0x01, 0x04, 'u', 's', 'e', 'r', 0x05, 'w', 'r', 'o', 'n', 'g'}
+	if _, err := clientConn.Write(authRequest); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("ReadFull returned error: %v", err)
+	}
+	if string(reply) != string([]byte{0x01, 0x01}) {
+		t.Fatalf("unexpected auth failure reply: %v", reply)
+	}
+	if err := <-done; !errors.Is(err, errSOCKS5AuthFailed) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
