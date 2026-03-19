@@ -8,86 +8,42 @@
 package client
 
 import (
-	"sync"
 	"time"
+
+	"masterdnsvpn-go/internal/inflight"
 )
 
-type dnsInflightEntry struct {
-	createdAt time.Time
-	ready     chan struct{}
-}
+type dnsInflightEntry = inflight.Entry[struct{}]
 
 type dnsInflightManager struct {
-	timeout       time.Duration
-	cleanupWindow time.Duration
-	nextCleanupAt time.Time
-	mu            sync.Mutex
-	items         map[string]*dnsInflightEntry
+	inner *inflight.Manager[struct{}]
 }
 
 func newDNSInflightManager(timeout time.Duration) *dnsInflightManager {
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	cleanupWindow := timeout / 4
-	if cleanupWindow < time.Second {
-		cleanupWindow = time.Second
-	}
 	return &dnsInflightManager{
-		timeout:       timeout,
-		cleanupWindow: cleanupWindow,
-		items:         make(map[string]*dnsInflightEntry),
+		inner: inflight.New[struct{}](timeout, 30*time.Second, nil),
 	}
 }
 
 func (m *dnsInflightManager) Acquire(cacheKey []byte, now time.Time) (*dnsInflightEntry, bool) {
-	if m == nil || len(cacheKey) == 0 {
+	if m == nil {
 		return nil, false
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	key := string(cacheKey)
-	if m.nextCleanupAt.IsZero() || !now.Before(m.nextCleanupAt) {
-		for existingKey, entry := range m.items {
-			if entry == nil || now.Sub(entry.createdAt) >= m.timeout {
-				delete(m.items, existingKey)
-			}
-		}
-		m.nextCleanupAt = now.Add(m.cleanupWindow)
-	}
-
-	if entry, ok := m.items[key]; ok && entry != nil && now.Sub(entry.createdAt) < m.timeout {
-		return entry, false
-	}
-
-	entry := &dnsInflightEntry{
-		createdAt: now,
-		ready:     make(chan struct{}),
-	}
-	m.items[key] = entry
-	return entry, true
+	return m.inner.Acquire(cacheKey, now)
 }
 
 func (m *dnsInflightManager) Begin(cacheKey []byte, now time.Time) bool {
-	_, leader := m.Acquire(cacheKey, now)
-	return leader
+	if m == nil {
+		return false
+	}
+	return m.inner.Begin(cacheKey, now)
 }
 
 func (m *dnsInflightManager) Resolve(cacheKey []byte) {
-	if m == nil || len(cacheKey) == 0 {
+	if m == nil {
 		return
 	}
-
-	m.mu.Lock()
-	entry := m.items[string(cacheKey)]
-	delete(m.items, string(cacheKey))
-	m.mu.Unlock()
-
-	if entry != nil {
-		close(entry.ready)
-	}
+	m.inner.Resolve(cacheKey, struct{}{}, false)
 }
 
 func (m *dnsInflightManager) Complete(cacheKey []byte) {
@@ -95,23 +51,9 @@ func (m *dnsInflightManager) Complete(cacheKey []byte) {
 }
 
 func (m *dnsInflightManager) Wait(entry *dnsInflightEntry, timeout time.Duration) bool {
-	if entry == nil {
+	if m == nil {
 		return false
 	}
-	if timeout <= 0 {
-		timeout = m.timeout
-	}
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case <-entry.ready:
-		return true
-	case <-timer.C:
-		return false
-	}
+	_, ok := m.inner.Wait(entry, timeout)
+	return ok
 }
