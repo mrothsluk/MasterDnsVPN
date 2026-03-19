@@ -110,14 +110,15 @@ func (s *streamOutboundStore) Next(sessionID uint8, now time.Time) (VpnProto.Pac
 		if !ok {
 			return VpnProto.Packet{}, false
 		}
+		retryBase := streamOutboundRetryBase(session)
 		session.pending = append(session.pending, outboundPendingPacket{
 			Packet:     packet,
 			CreatedAt:  now,
 			LastSentAt: now,
-			RetryAt:    now.Add(streamOutboundRetryBase(session)),
-			RetryDelay: streamOutboundRetryBase(session),
+			RetryAt:    now.Add(retryBase),
+			RetryDelay: retryBase,
 		})
-		return cloneOutboundPacket(packet), true
+		return packet, true
 	}
 	selectedIdx := -1
 	for idx := range session.pending {
@@ -142,7 +143,7 @@ func (s *streamOutboundStore) Next(sessionID uint8, now time.Time) (VpnProto.Pac
 		delay = streamOutboundMaxRetryDelay
 	}
 	session.pending[selectedIdx].RetryDelay = delay
-	return cloneOutboundPacket(packet), true
+	return packet, true
 }
 
 func (s *streamOutboundStore) ExpireStalled(sessionID uint8, now time.Time, maxRetries int, ttl time.Duration) []uint16 {
@@ -164,19 +165,19 @@ func (s *streamOutboundStore) ExpireStalled(sessionID uint8, now time.Time, maxR
 		return nil
 	}
 
-	expiredMap := make(map[uint16]struct{}, 2)
+	expired := make([]uint16, 0, 2)
 	for _, pending := range session.pending {
-		if pending.RetryCount >= maxRetries || now.Sub(pending.CreatedAt) >= ttl {
-			expiredMap[pending.Packet.StreamID] = struct{}{}
+		if pending.RetryCount < maxRetries && now.Sub(pending.CreatedAt) < ttl {
+			continue
+		}
+		if !containsExpiredStream(expired, pending.Packet.StreamID) {
+			expired = append(expired, pending.Packet.StreamID)
 		}
 	}
-	if len(expiredMap) == 0 {
+	if len(expired) == 0 {
 		return nil
 	}
-
-	expired := make([]uint16, 0, len(expiredMap))
-	for streamID := range expiredMap {
-		expired = append(expired, streamID)
+	for _, streamID := range expired {
 		pruneOutboundStreamPackets(session, streamID)
 	}
 	if len(session.pending) == 0 && len(session.queue) == 0 {
@@ -189,6 +190,7 @@ func (s *streamOutboundStore) Ack(sessionID uint8, packetType uint8, streamID ui
 	if s == nil {
 		return false
 	}
+	ackedAt := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -204,7 +206,7 @@ func (s *streamOutboundStore) Ack(sessionID uint8, packetType uint8, streamID ui
 		if pending.Packet.StreamID != streamID || pending.Packet.SequenceNum != sequenceNum {
 			continue
 		}
-		updateStreamOutboundRTO(session, pending, time.Now())
+		updateStreamOutboundRTO(session, pending, ackedAt)
 		copy(session.pending[idx:], session.pending[idx+1:])
 		lastIdx := len(session.pending) - 1
 		session.pending[lastIdx] = outboundPendingPacket{}
@@ -276,11 +278,6 @@ func matchesStreamOutboundAck(pendingType uint8, ackType uint8) bool {
 	}
 }
 
-func cloneOutboundPacket(packet VpnProto.Packet) VpnProto.Packet {
-	packet.Payload = append([]byte(nil), packet.Payload...)
-	return packet
-}
-
 func pruneOutboundStreamPackets(session *streamOutboundSession, streamID uint16) {
 	if session == nil {
 		return
@@ -309,6 +306,15 @@ func pruneOutboundStreamPackets(session *streamOutboundSession, streamID uint16)
 		}
 		session.pending = filteredPending
 	}
+}
+
+func containsExpiredStream(items []uint16, streamID uint16) bool {
+	for _, item := range items {
+		if item == streamID {
+			return true
+		}
+	}
+	return false
 }
 
 func prependOutboundPacket(queue *[]VpnProto.Packet, packet VpnProto.Packet) {

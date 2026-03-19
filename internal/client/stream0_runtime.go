@@ -152,7 +152,7 @@ func (r *stream0Runtime) ExchangeDNSQuery(payload []byte, timeout time.Duration)
 		return VpnProto.Packet{}, ErrStream0RuntimeStopped
 	}
 	r.pendingBySeq[sequenceNum] = &stream0Pending{
-		packetType: packetTypeForDNSQuery(),
+		packetType: Enums.PACKET_DNS_QUERY_REQ,
 		payload:    append([]byte(nil), payload...),
 		resultCh:   resultCh,
 		deadline:   time.Now().Add(timeout),
@@ -441,7 +441,7 @@ func (r *stream0Runtime) scheduleRetry(sequenceNum uint16, err error) {
 		entry.retryDelay = nextDelay
 	}
 	packetType := entry.packetType
-	payload := append([]byte(nil), entry.payload...)
+	payload := entry.payload
 	r.mu.Unlock()
 
 	timer := time.NewTimer(delay)
@@ -481,10 +481,6 @@ func (r *stream0Runtime) scheduleRetry(sequenceNum uint16, err error) {
 		}
 		r.notifyWake()
 	}()
-}
-
-func packetTypeForDNSQuery() uint8 {
-	return Enums.PACKET_DNS_QUERY_REQ
 }
 
 func stream0PriorityForPacket(packetType uint8) int {
