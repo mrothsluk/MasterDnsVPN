@@ -36,10 +36,6 @@ func BuildFormatErrorResponseFromLite(request []byte, parsed LitePacket) ([]byte
 	return buildResponseWithRCodeLite(request, parsed, Enums.DNSR_CODE_FORMAT_ERROR)
 }
 
-func BuildRefusedResponse(request []byte) ([]byte, error) {
-	return buildResponseWithRCode(request, Enums.DNSR_CODE_REFUSED)
-}
-
 func BuildRefusedResponseFromLite(request []byte, parsed LitePacket) ([]byte, error) {
 	return buildResponseWithRCodeLite(request, parsed, Enums.DNSR_CODE_REFUSED)
 }
@@ -50,10 +46,6 @@ func BuildServerFailureResponse(request []byte) ([]byte, error) {
 
 func BuildServerFailureResponseFromLite(request []byte, parsed LitePacket) ([]byte, error) {
 	return buildResponseWithRCodeLite(request, parsed, Enums.DNSR_CODE_SERVER_FAILURE)
-}
-
-func BuildNotImplementedResponse(request []byte) ([]byte, error) {
-	return buildResponseWithRCode(request, Enums.DNSR_CODE_NOT_IMPLEMENTED)
 }
 
 func BuildNotImplementedResponseFromLite(request []byte, parsed LitePacket) ([]byte, error) {
@@ -122,14 +114,6 @@ func buildResponseWithRCodeLite(request []byte, parsed LitePacket, rcode uint8) 
 	}
 
 	return response, nil
-}
-
-func LooksLikeDNSRequest(data []byte) bool {
-	if len(data) < dnsHeaderSize {
-		return false
-	}
-
-	return isLikelyDNSRequestHeader(parseHeader(data))
 }
 
 func isLikelyDNSRequestHeader(header Header) bool {

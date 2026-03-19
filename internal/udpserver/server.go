@@ -302,7 +302,7 @@ func (s *Server) safeHandlePacket(packet []byte) (response []byte) {
 		if recovered := recover(); recovered != nil {
 			if s.log != nil {
 				s.log.Errorf(
-					"💥 <red>Packet Handler Panic Recovered</red> <magenta>|</magenta> <yellow>%v</yellow>",
+					"💥 <red>Packet Handler Panic Recovered, <yellow>%v</yellow></red>",
 					recovered,
 				)
 			}
@@ -313,17 +313,16 @@ func (s *Server) safeHandlePacket(packet []byte) (response []byte) {
 }
 
 func (s *Server) handlePacket(packet []byte) []byte {
-	if !DnsParser.LooksLikeDNSRequest(packet) {
-		return nil
-	}
-
-	parsed, err := DnsParser.ParsePacketLite(packet)
+	parsed, err := DnsParser.ParseDNSRequestLite(packet)
 	if err != nil {
-		return buildFormatErrorResponse(packet)
+		if errors.Is(err, DnsParser.ErrNotDNSRequest) || errors.Is(err, DnsParser.ErrPacketTooShort) {
+			return nil
+		}
+		return buildNoDataResponse(packet)
 	}
 
 	if !parsed.HasQuestion {
-		return buildFormatErrorResponse(packet)
+		return buildNoDataResponse(packet)
 	}
 
 	decision := s.domainMatcher.Match(parsed)
@@ -331,7 +330,7 @@ func (s *Server) handlePacket(packet []byte) []byte {
 	case domainMatcher.ActionProcess:
 		return s.handleTunnelCandidate(packet, parsed, decision)
 	case domainMatcher.ActionFormatError:
-		return buildFormatErrorResponseLite(packet, parsed)
+		return buildNoDataResponseLite(packet, parsed)
 	case domainMatcher.ActionNoData:
 		return buildNoDataResponseLite(packet, parsed)
 	default:
@@ -429,16 +428,8 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	}
 }
 
-func buildFormatErrorResponse(packet []byte) []byte {
-	response, err := DnsParser.BuildFormatErrorResponse(packet)
-	if err != nil {
-		return nil
-	}
-	return response
-}
-
-func buildFormatErrorResponseLite(packet []byte, parsed DnsParser.LitePacket) []byte {
-	response, err := DnsParser.BuildFormatErrorResponseFromLite(packet, parsed)
+func buildNoDataResponse(packet []byte) []byte {
+	response, err := DnsParser.BuildEmptyNoErrorResponse(packet)
 	if err != nil {
 		return nil
 	}

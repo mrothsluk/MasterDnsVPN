@@ -33,12 +33,11 @@ type dnsFragmentEntry struct {
 }
 
 func (s *Server) buildDNSQueryResponsePayload(rawQuery []byte, sessionID uint8, sequenceNum uint16) []byte {
-	if !DnsParser.LooksLikeDNSRequest(rawQuery) {
-		return nil
-	}
-
-	parsed, err := DnsParser.ParsePacketLite(rawQuery)
+	parsed, err := DnsParser.ParseDNSRequestLite(rawQuery)
 	if err != nil {
+		if errors.Is(err, DnsParser.ErrNotDNSRequest) || errors.Is(err, DnsParser.ErrPacketTooShort) {
+			return nil
+		}
 		response, responseErr := DnsParser.BuildFormatErrorResponse(rawQuery)
 		if responseErr != nil {
 			return nil

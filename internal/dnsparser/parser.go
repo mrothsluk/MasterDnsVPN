@@ -73,17 +73,29 @@ type LitePacket struct {
 	QuestionEndOffset int
 }
 
-func IsDNSPacket(data []byte) bool {
-	_, err := ParsePacketLite(data)
-	return err == nil
-}
-
 func ParsePacketLite(data []byte) (LitePacket, error) {
 	if len(data) < dnsHeaderSize {
 		return LitePacket{}, ErrPacketTooShort
 	}
 
 	header := parseHeader(data)
+	return parsePacketLiteWithHeader(data, header)
+}
+
+func ParseDNSRequestLite(data []byte) (LitePacket, error) {
+	if len(data) < dnsHeaderSize {
+		return LitePacket{}, ErrPacketTooShort
+	}
+
+	header := parseHeader(data)
+	if !isLikelyDNSRequestHeader(header) {
+		return LitePacket{}, ErrNotDNSRequest
+	}
+
+	return parsePacketLiteWithHeader(data, header)
+}
+
+func parsePacketLiteWithHeader(data []byte, header Header) (LitePacket, error) {
 	packet := LitePacket{Header: header}
 	if header.QDCount == 0 {
 		packet.QuestionEndOffset = dnsHeaderSize

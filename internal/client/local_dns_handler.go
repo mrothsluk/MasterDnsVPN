@@ -31,12 +31,11 @@ type dnsQueryMetadata struct {
 }
 
 func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest) {
-	if !DnsParser.LooksLikeDNSRequest(query) {
-		return nil, nil
-	}
-
-	metadata, ok := parseDNSQueryMetadata(query)
-	if !ok {
+	metadata, err := parseDNSQueryMetadata(query)
+	if err != nil {
+		if err == DnsParser.ErrNotDNSRequest || err == DnsParser.ErrPacketTooShort {
+			return nil, nil
+		}
 		response, err := DnsParser.BuildFormatErrorResponse(query)
 		if err != nil {
 			return nil, nil
@@ -151,10 +150,13 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 	return response
 }
 
-func parseDNSQueryMetadata(query []byte) (dnsQueryMetadata, bool) {
-	parsed, err := DnsParser.ParsePacketLite(query)
-	if err != nil || !parsed.HasQuestion {
-		return dnsQueryMetadata{}, false
+func parseDNSQueryMetadata(query []byte) (dnsQueryMetadata, error) {
+	parsed, err := DnsParser.ParseDNSRequestLite(query)
+	if err != nil {
+		return dnsQueryMetadata{}, err
+	}
+	if !parsed.HasQuestion {
+		return dnsQueryMetadata{}, DnsParser.ErrInvalidQuestion
 	}
 
 	question := parsed.FirstQuestion
@@ -163,5 +165,5 @@ func parseDNSQueryMetadata(query []byte) (dnsQueryMetadata, bool) {
 		QType:  question.Type,
 		QClass: question.Class,
 		Parsed: parsed,
-	}, true
+	}, nil
 }
