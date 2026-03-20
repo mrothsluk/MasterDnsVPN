@@ -433,22 +433,15 @@ func newUDPQueryTransport(resolverLabel string) (*udpQueryTransport, error) {
 	}, nil
 }
 
-func sendOneWayUDPQuery(resolverLabel string, packet []byte, deadline time.Time) error {
-	if len(packet) == 0 {
-		return nil
-	}
-
-	conn, err := dialUDPResolver(resolverLabel)
+func (c *Client) sendFastOneWayUDP(resolverLabel string, packet []byte, deadline time.Time) {
+	conn, err := c.getUDPConn(resolverLabel)
 	if err != nil {
-		return err
+		return
 	}
-	defer conn.Close()
+	defer c.putUDPConn(resolverLabel, conn)
 
-	if err := conn.SetWriteDeadline(deadline); err != nil {
-		return err
-	}
-	_, err = conn.Write(packet)
-	return err
+	_ = conn.SetWriteDeadline(deadline)
+	_, _ = conn.Write(packet)
 }
 
 func exchangeUDPQuery(transport *udpQueryTransport, packet []byte, timeout time.Duration) ([]byte, error) {

@@ -30,12 +30,16 @@ func (c *Client) BestEffortSessionClose(timeout time.Duration) {
 		return
 	}
 
-	timeout = normalizeTimeout(timeout, sessionCloseDefaultWindow)
+	// Hard limit of 1 second for session close as per user requirement
+	if timeout > time.Second || timeout <= 0 {
+		timeout = time.Second
+	}
 	deadline := time.Now().Add(timeout)
 	queries := make(map[string][]byte, len(targets))
 
 	var wg sync.WaitGroup
 	done := make(chan struct{})
+
 	for _, conn := range targets {
 		query, ok := queries[conn.Domain]
 		if !ok {
@@ -49,9 +53,11 @@ func (c *Client) BestEffortSessionClose(timeout time.Duration) {
 
 		connCopy := conn
 		packetCopy := query
-		wg.Go(func() {
-			_ = c.sendOneWaySessionPacket(connCopy, packetCopy, deadline)
-		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.sendOneWaySessionPacket(connCopy, packetCopy, deadline)
+		}()
 	}
 
 	go func() {
@@ -78,7 +84,8 @@ func (c *Client) activeSessionCloseTargets(limit int) []Connection {
 	targets := make([]Connection, 0, limit)
 	candidateCount := min(len(c.connections), max(limit, limit*max(1, len(c.cfg.Domains))))
 
-	for _, conn := range c.balancer.GetUniqueConnections(candidateCount) {
+	conns := c.balancer.GetUniqueConnections(candidateCount)
+	for _, conn := range conns {
 		if !conn.IsValid || conn.ResolverLabel == "" {
 			continue
 		}
@@ -117,9 +124,10 @@ func (c *Client) buildSessionCloseQuery(domain string) ([]byte, error) {
 	})
 }
 
-func (c *Client) sendOneWaySessionPacket(connection Connection, packet []byte, deadline time.Time) error {
+func (c *Client) sendOneWaySessionPacket(connection Connection, packet []byte, deadline time.Time) {
 	if c != nil && c.sendOneWayPacketFn != nil {
-		return c.sendOneWayPacketFn(connection, packet, deadline)
+		_ = c.sendOneWayPacketFn(connection, packet, deadline)
+		return
 	}
-	return sendOneWayUDPQuery(connection.ResolverLabel, packet, deadline)
+	c.sendFastOneWayUDP(connection.ResolverLabel, packet, deadline)
 }

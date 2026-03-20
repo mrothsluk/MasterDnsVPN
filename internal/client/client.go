@@ -682,9 +682,7 @@ func (c *Client) sendClosedStreamOneWayPacket(packetType uint8, streamID uint16,
 			}
 			continue
 		}
-		if sendErr := c.sendOneWaySessionPacket(connection, query, deadline); sendErr != nil && firstErr == nil {
-			firstErr = sendErr
-		}
+		c.sendOneWaySessionPacket(connection, query, deadline)
 	}
 	return firstErr
 }
