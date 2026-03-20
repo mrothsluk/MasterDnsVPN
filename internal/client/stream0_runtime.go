@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
@@ -56,27 +57,28 @@ type stream0Runtime struct {
 	scheduler *arq.Scheduler
 
 	mu               sync.Mutex
-	running          bool
+	running          atomic.Bool
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
 	wakeCh           chan struct{}
 	dnsRequests      map[uint16]*stream0DNSRequestState
-	dnsActivitySeen  bool
-	lastDataActivity time.Time
-	lastPingTime     time.Time
+	dnsActivitySeen  atomic.Bool
+	lastDataActivity atomic.Int64 // UnixNano
+	lastPingTime     atomic.Int64 // UnixNano
 }
 
 func newStream0Runtime(client *Client) *stream0Runtime {
-	now := time.Now()
-	return &stream0Runtime{
-		client:           client,
-		scheduler:        arq.NewScheduler(1),
-		wakeCh:           make(chan struct{}, 1),
-		dnsRequests:      make(map[uint16]*stream0DNSRequestState, 16),
-		lastDataActivity: now,
-		lastPingTime:     now,
+	now := time.Now().UnixNano()
+	r := &stream0Runtime{
+		client:      client,
+		scheduler:   arq.NewScheduler(1),
+		wakeCh:      make(chan struct{}, 1),
+		dnsRequests: make(map[uint16]*stream0DNSRequestState, 16),
 	}
+	r.lastDataActivity.Store(now)
+	r.lastPingTime.Store(now)
+	return r
 }
 
 func (r *stream0Runtime) Start(parent context.Context) error {
@@ -85,7 +87,7 @@ func (r *stream0Runtime) Start(parent context.Context) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.running {
+	if r.running.Load() {
 		return nil
 	}
 
@@ -93,9 +95,12 @@ func (r *stream0Runtime) Start(parent context.Context) error {
 		parent = context.Background()
 	}
 	r.ctx, r.cancel = context.WithCancel(parent)
-	r.running = true
-	r.lastDataActivity = time.Now()
-	r.lastPingTime = r.lastDataActivity
+	r.running.Store(true)
+
+	now := time.Now().UnixNano()
+	r.lastDataActivity.Store(now)
+	r.lastPingTime.Store(now)
+
 	r.scheduler.SetMaxPackedBlocks(r.client.MaxPackedBlocks())
 	r.wg.Add(2)
 	go r.txLoop()
@@ -107,9 +112,7 @@ func (r *stream0Runtime) IsRunning() bool {
 	if r == nil {
 		return false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.running
+	return r.running.Load()
 }
 
 func (r *stream0Runtime) SetMaxPackedBlocks(limit int) {
@@ -123,10 +126,8 @@ func (r *stream0Runtime) NotifyDNSActivity() {
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	r.dnsActivitySeen = true
-	r.lastDataActivity = time.Now()
-	r.mu.Unlock()
+	r.dnsActivitySeen.Store(true)
+	r.lastDataActivity.Store(time.Now().UnixNano())
 }
 
 func (r *stream0Runtime) QueueMainPacket(packet arq.QueuedPacket) bool {
@@ -189,14 +190,15 @@ func (r *stream0Runtime) QueueDNSRequest(payload []byte) error {
 	}
 
 	r.mu.Lock()
-	if !r.running {
+	if !r.running.Load() {
 		r.mu.Unlock()
 		return ErrStream0RuntimeStopped
 	}
 	r.dnsRequests[sequenceNum] = state
-	r.dnsActivitySeen = true
-	r.lastDataActivity = now
 	r.mu.Unlock()
+
+	r.dnsActivitySeen.Store(true)
+	r.lastDataActivity.Store(now.UnixNano())
 
 	r.notifyWake()
 	return nil
@@ -265,6 +267,9 @@ func (r *stream0Runtime) txLoop() {
 
 func (r *stream0Runtime) pingLoop() {
 	defer r.wg.Done()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -280,9 +285,7 @@ func (r *stream0Runtime) pingLoop() {
 		shouldPing, pingSleep := r.nextPingSchedule(now)
 		if shouldPing {
 			if r.QueuePing() {
-				r.mu.Lock()
-				r.lastPingTime = time.Now()
-				r.mu.Unlock()
+				r.lastPingTime.Store(now.UnixNano())
 			}
 		}
 
@@ -291,10 +294,15 @@ func (r *stream0Runtime) pingLoop() {
 			sleepFor = 100 * time.Millisecond
 		}
 
-		timer := time.NewTimer(sleepFor)
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(sleepFor)
 		select {
 		case <-r.ctx.Done():
-			timer.Stop()
 			return
 		case <-timer.C:
 		}
@@ -316,11 +324,13 @@ func (r *stream0Runtime) nextPingSchedule(now time.Time) (bool, time.Duration) {
 		}
 		pingInterval := stream0DNSOnlyPingInterval
 		maxSleep := stream0PingDNSOnlyMaxSleep
-		if now.Sub(r.lastDataActivity) < stream0DNSOnlyWarmDuration {
+		lastDataActivity := time.Unix(0, r.lastDataActivity.Load())
+		if now.Sub(lastDataActivity) < stream0DNSOnlyWarmDuration {
 			pingInterval = stream0DNSOnlyWarmPingInterval
 			maxSleep = stream0DNSOnlyWarmMaxSleep
 		}
-		timeSinceLastPing := now.Sub(r.lastPingTime)
+		lastPingTime := time.Unix(0, r.lastPingTime.Load())
+		timeSinceLastPing := now.Sub(lastPingTime)
 		if timeSinceLastPing >= pingInterval {
 			return true, pingInterval
 		}
@@ -331,11 +341,12 @@ func (r *stream0Runtime) nextPingSchedule(now time.Time) (bool, time.Duration) {
 		return false, sleepFor
 	}
 
-	if !r.dnsActivitySeen {
+	if !r.dnsActivitySeen.Load() {
 		return false, time.Second
 	}
 
-	idleTime := now.Sub(r.lastDataActivity)
+	lastDataActivity := time.Unix(0, r.lastDataActivity.Load())
+	idleTime := now.Sub(lastDataActivity)
 	pingInterval := stream0PingBusyInterval
 	maxSleep := stream0PingBusyMaxSleep
 	if idleTime >= stream0PingIdleHighThreshold {
@@ -346,7 +357,8 @@ func (r *stream0Runtime) nextPingSchedule(now time.Time) (bool, time.Duration) {
 		maxSleep = stream0PingMediumIdleMaxSleep
 	}
 
-	timeSinceLastPing := now.Sub(r.lastPingTime)
+	lastPingTime := time.Unix(0, r.lastPingTime.Load())
+	timeSinceLastPing := now.Sub(lastPingTime)
 	if timeSinceLastPing >= pingInterval {
 		return true, pingInterval
 	}
@@ -573,9 +585,10 @@ func (r *stream0Runtime) queueDueDNSRetries(now time.Time) time.Duration {
 }
 
 func (r *stream0Runtime) noteServerDataActivity() {
-	r.mu.Lock()
-	r.lastDataActivity = time.Now()
-	r.mu.Unlock()
+	if r == nil {
+		return
+	}
+	r.lastDataActivity.Store(time.Now().UnixNano())
 }
 
 func (r *stream0Runtime) notifyWake() {
@@ -588,8 +601,8 @@ func (r *stream0Runtime) notifyWake() {
 func (r *stream0Runtime) failAllPending() {
 	r.mu.Lock()
 	r.dnsRequests = make(map[uint16]*stream0DNSRequestState, 4)
-	r.running = false
 	r.mu.Unlock()
+	r.running.Store(false)
 }
 
 func (r *stream0Runtime) ResetForReconnect() {
@@ -598,11 +611,12 @@ func (r *stream0Runtime) ResetForReconnect() {
 	}
 	r.mu.Lock()
 	r.dnsRequests = make(map[uint16]*stream0DNSRequestState, 4)
-	r.dnsActivitySeen = false
-	now := time.Now()
-	r.lastDataActivity = now
-	r.lastPingTime = now
 	r.mu.Unlock()
+
+	r.dnsActivitySeen.Store(false)
+	now := time.Now().UnixNano()
+	r.lastDataActivity.Store(now)
+	r.lastPingTime.Store(now)
 	if r.scheduler != nil {
 		r.scheduler.HandleSessionReset()
 	}
