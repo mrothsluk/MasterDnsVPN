@@ -593,7 +593,7 @@ func (s *Server) queueImmediateControlAck(record *sessionRecord, packet VpnProto
 
 	stream, exists := record.getStream(packet.StreamID)
 	if (!exists || stream == nil) && isStreamCreationPacketType(packet.PacketType) {
-		stream = record.getOrCreateStream(packet.StreamID, s.streamARQConfig(packet.PacketType == Enums.PACKET_SOCKS5_SYN), nil, s.log)
+		stream = record.getOrCreateStream(packet.StreamID, s.streamARQConfig(packet.PacketType == Enums.PACKET_SOCKS5_SYN, record.DownloadCompression), nil, s.log)
 		exists = stream != nil
 	}
 	if !exists || stream == nil {
@@ -842,11 +842,11 @@ func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) boo
 	}
 
 	// Push to corresponding stream's TXQueue. Stream 0 is initialized in findOrCreate.
-	stream := record.getOrCreateStream(packet.StreamID, s.streamARQConfig(false), nil, s.log)
+	stream := record.getOrCreateStream(packet.StreamID, s.streamARQConfig(false, record.DownloadCompression), nil, s.log)
 	return stream.PushTXPacket(getEffectivePriority(packet.PacketType, 3), packet.PacketType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, packet.CompressionType, 0, packet.Payload)
 }
 
-func (s *Server) streamARQConfig(isSocks bool) arq.Config {
+func (s *Server) streamARQConfig(isSocks bool, compressionType uint8) arq.Config {
 	return arq.Config{
 		WindowSize:               s.cfg.ARQWindowSize,
 		RTO:                      0.2,
@@ -865,6 +865,7 @@ func (s *Server) streamARQConfig(isSocks bool) arq.Config {
 		GracefulDrainTimeout:     600.0,
 		TerminalDrainTimeout:     60.0,
 		TerminalAckWaitTimeout:   30.0,
+		CompressionType:          compressionType,
 	}
 }
 
@@ -1091,12 +1092,17 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 
 func vpnPacketFromTX(p *serverStreamTXPacket, streamID uint16) VpnProto.Packet {
 	return VpnProto.Packet{
-		PacketType:     p.PacketType,
-		StreamID:       streamID,
-		SequenceNum:    p.SequenceNum,
-		Payload:        p.Payload,
-		HasSequenceNum: p.SequenceNum != 0,
-		HasStreamID:    true,
+		PacketType:         p.PacketType,
+		StreamID:           streamID,
+		SequenceNum:        p.SequenceNum,
+		FragmentID:         p.FragmentID,
+		TotalFragments:     p.TotalFragments,
+		CompressionType:    p.CompressionType,
+		HasCompressionType: p.CompressionType != compression.TypeOff,
+		Payload:            p.Payload,
+		HasSequenceNum:     p.SequenceNum != 0,
+		HasFragmentInfo:    p.FragmentID != 0 || p.TotalFragments != 0,
+		HasStreamID:        true,
 	}
 }
 
@@ -1474,7 +1480,7 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet, sessionReco
 			s.log.Debugf("🧦 <blue>STREAM_SYN Processing, Session: <cyan>%d</cyan> | Stream: <cyan>%d</cyan> | Forwarding</blue>", vpnPacket.SessionID, vpnPacket.StreamID)
 		}
 
-		stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false), nil, s.log)
+		stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false, record.DownloadCompression), nil, s.log)
 		upstreamConn, err := s.dialSOCKSStreamTarget(s.cfg.ForwardIP, uint16(s.cfg.ForwardPort), nil)
 		if err != nil {
 			_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
@@ -1494,7 +1500,7 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet, sessionReco
 
 		stream.ARQ.SetLocalConn(upstreamConn)
 	} else {
-		record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false), nil, s.log)
+		record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false, record.DownloadCompression), nil, s.log)
 	}
 
 }
@@ -1523,7 +1529,7 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet, sessionReco
 		return
 	}
 
-	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(true), nil, s.log)
+	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(true, record.DownloadCompression), nil, s.log)
 
 	target, err := SocksProto.ParseTargetPayload(assembledTarget)
 	if err != nil {
@@ -1641,7 +1647,7 @@ func (s *Server) processDeferredStreamData(vpnPacket VpnProto.Packet, sessionRec
 		return
 	}
 
-	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false), nil, s.log)
+	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(false, record.DownloadCompression), nil, s.log)
 	stream.ARQ.ReceiveData(vpnPacket.SequenceNum, assembledPayload)
 }
 

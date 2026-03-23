@@ -17,14 +17,15 @@ import (
 var ErrInvalidCompressedPayload = errors.New("invalid compressed vpn payload")
 
 func PreparePayload(packetType uint8, payload []byte, requestedCompression uint8, minSize int) ([]byte, uint8) {
+	requestedCompression = compression.NormalizeAvailableType(requestedCompression)
+	if requestedCompression == compression.TypeOff {
+		return payload, compression.TypeOff
+	}
+
 	if !hasCompressionExtension(packetType) {
 		return payload, compression.TypeOff
 	}
 	if len(payload) == 0 {
-		return payload, compression.TypeOff
-	}
-	requestedCompression = compression.NormalizeAvailableType(requestedCompression)
-	if requestedCompression == compression.TypeOff {
 		return payload, compression.TypeOff
 	}
 	return compression.CompressPayload(payload, requestedCompression, minSize)

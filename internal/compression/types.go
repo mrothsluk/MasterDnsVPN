@@ -147,7 +147,10 @@ func CompressPayload(data []byte, compType uint8, minSize int) ([]byte, uint8) {
 		compData, err = compressLZ4(data)
 	}
 
-	if err != nil || len(compData) >= len(data) {
+	if err != nil {
+		return data, TypeOff
+	}
+	if len(compData) >= len(data) {
 		return data, TypeOff
 	}
 

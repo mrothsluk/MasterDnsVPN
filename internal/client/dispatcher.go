@@ -329,7 +329,13 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 				SessionID:     c.sessionID,
 				SessionCookie: c.sessionCookie,
 				PacketType:    finalPacket.packetType,
-				Payload:       finalPacket.payload,
+				CompressionType: func() uint8 {
+					if wasPacked {
+						return c.uploadCompression
+					}
+					return item.CompressionType
+				}(),
+				Payload: finalPacket.payload,
 			}
 
 			if wasPacked {
@@ -341,7 +347,7 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 				opts.TotalFragments = item.TotalFragments
 			}
 
-			encoded, err := VpnProto.BuildEncodedAuto(opts, c.codec, c.cfg.CompressionMinSize)
+			encoded, err := c.buildEncodedAutoWithCompressionTrace(opts)
 			if err != nil {
 				continue
 			}
