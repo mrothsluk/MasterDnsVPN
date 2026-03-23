@@ -13,6 +13,7 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/mlq"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -100,15 +101,15 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 					SequenceNum:   orphanPacket.SequenceNum,
 				}
 
-			encoded, err := VpnProto.BuildEncodedAuto(opts, c.codec, c.cfg.CompressionMinSize)
-			if err != nil {
-				continue
-			}
+				encoded, err := VpnProto.BuildEncodedAuto(opts, c.codec, c.cfg.CompressionMinSize)
+				if err != nil {
+					continue
+				}
 
-			dnsPacket, err := buildTunnelTXTQuestion(domain, encoded)
-			if err != nil {
-				continue
-			}
+				dnsPacket, err := buildTunnelTXTQuestion(domain, encoded)
+				if err != nil {
+					continue
+				}
 
 				select {
 				case c.txChannel <- asyncPacket{
@@ -222,8 +223,8 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 			for blocks < maxBlocks {
 				popped, poppedOk := selected.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
 					return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
-				}, func(p *clientStreamTXPacket) uint32 {
-					return getTrackingKey(p.PacketType, p.SequenceNum, p.FragmentID)
+				}, func(p *clientStreamTXPacket) uint64 {
+					return mlq.GenerateKey(selected.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
 				})
 				if !poppedOk {
 					break
@@ -251,8 +252,8 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 					for blocks < maxBlocks {
 						popped, poppedOk := otherStream.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
 							return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
-						}, func(p *clientStreamTXPacket) uint32 {
-							return getTrackingKey(p.PacketType, p.SequenceNum, p.FragmentID)
+						}, func(p *clientStreamTXPacket) uint64 {
+							return mlq.GenerateKey(sid, p.PacketType, p.SequenceNum, p.FragmentID)
 						})
 						if !poppedOk {
 							break

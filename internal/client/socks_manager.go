@@ -519,10 +519,8 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 	arqObj, err := c.getStreamARQ(packet.StreamID)
 	if err == nil {
 		arqObj.MarkSocksConnected()
-		if s != nil {
-			for _, chunk := range s.takePendingLocalData() {
-				arqObj.InjectOutboundData(chunk)
-			}
+		for _, chunk := range s.takePendingLocalData() {
+			arqObj.InjectOutboundData(chunk)
 		}
 	}
 

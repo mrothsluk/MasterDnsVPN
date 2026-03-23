@@ -3,11 +3,11 @@ package mlq
 import "testing"
 
 type testItem struct {
-	key   uint32
+	key   uint64
 	value string
 }
 
-func testKey(item *testItem) uint32 {
+func testKey(item *testItem) uint64 {
 	if item == nil {
 		return 0
 	}

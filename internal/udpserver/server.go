@@ -28,6 +28,7 @@ import (
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/mlq"
 	"masterdnsvpn-go/internal/security"
 	SocksProto "masterdnsvpn-go/internal/socksproto"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
@@ -954,7 +955,9 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 			continue
 		}
 
-		if item, _, ok := stream.TXQueue.Pop(txPacketKeyExtractor); ok {
+		if item, _, ok := stream.TXQueue.Pop(func(p *serverStreamTXPacket) uint64 {
+			return mlq.GenerateKey(streamID, p.PacketType, p.SequenceNum, p.FragmentID)
+		}); ok {
 			record.RRStreamID = streamID + 1 // Move to next for next call
 			if VpnProto.IsPackableControlPacket(item.PacketType, len(item.Payload)) && record.MaxPackedBlocks > 1 {
 				return s.packControlBlocks(record, item, streamID), true
@@ -1000,7 +1003,9 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 		for blocks < limit {
 			popped, ok := stream.TXQueue.PopAnyIf(func(p *serverStreamTXPacket) bool {
 				return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
-			}, txPacketKeyExtractor)
+			}, func(p *serverStreamTXPacket) uint64 {
+				return mlq.GenerateKey(streamID, p.PacketType, p.SequenceNum, p.FragmentID)
+			})
 
 			if !ok {
 				break
@@ -1022,10 +1027,6 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 		StreamID:    0,
 		HasStreamID: true,
 	}
-}
-
-func txPacketKeyExtractor(p *serverStreamTXPacket) uint32 {
-	return getTrackingKey(p.PacketType, p.SequenceNum, p.FragmentID)
 }
 
 func vpnPacketFromTX(p *serverStreamTXPacket, streamID uint16) VpnProto.Packet {

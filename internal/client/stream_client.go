@@ -72,18 +72,6 @@ type Stream_client struct {
 	pendingLocalData   [][]byte
 }
 
-// getTrackingKey generates a unified key for duplicate prevention.
-// It ensures that certain types (like DATA and RESEND) share the same tracking slot.
-func getTrackingKey(packetType uint8, sequenceNum uint16, fragmentID uint8) uint32 {
-	t := packetType
-	// Map related types to a single ID to prevent duplicates across types
-	if t == Enums.PACKET_STREAM_RESEND {
-		t = Enums.PACKET_STREAM_DATA
-	}
-	// Key: [8bit PacketType][16bit SequenceNum][8bit FragmentID]
-	return uint32(t)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
-}
-
 // get_new_stream_id finds the next available stream ID using a circular counter (1-65535).
 func (c *Client) get_new_stream_id() (uint16, bool) {
 	c.streamsMu.Lock()
@@ -190,7 +178,7 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 // PushTXPacket adds a packet to the appropriate priority queue if it's not a duplicate.
 func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool {
 	// Generate the tracking key (Policy)
-	key := getTrackingKey(packetType, sequenceNum, fragmentID)
+	key := mlq.GenerateKey(s.StreamID, packetType, sequenceNum, fragmentID)
 
 	// Delegate to MLQ (Mechanism)
 	priority = Enums.NormalizePacketPriority(packetType, priority)
@@ -230,8 +218,8 @@ func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum
 // PopNextTXPacket retrieves the highest priority packet from the queues.
 func (s *Stream_client) PopNextTXPacket() (*clientStreamTXPacket, int, bool) {
 	// Delegate to MLQ
-	packet, priority, ok := s.txQueue.Pop(func(p *clientStreamTXPacket) uint32 {
-		return getTrackingKey(p.PacketType, p.SequenceNum, p.FragmentID)
+	packet, priority, ok := s.txQueue.Pop(func(p *clientStreamTXPacket) uint64 {
+		return mlq.GenerateKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
 	})
 
 	return packet, priority, ok
@@ -239,7 +227,7 @@ func (s *Stream_client) PopNextTXPacket() (*clientStreamTXPacket, int, bool) {
 
 // GetQueuedPacket checks if a packet exists in any priority queue in O(1).
 func (s *Stream_client) GetQueuedPacket(packetType uint8, sequenceNum uint16, fragmentID uint8) (*clientStreamTXPacket, bool) {
-	key := getTrackingKey(packetType, sequenceNum, fragmentID)
+	key := mlq.GenerateKey(s.StreamID, packetType, sequenceNum, fragmentID)
 	return s.txQueue.Get(key)
 }
 

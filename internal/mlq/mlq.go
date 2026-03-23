@@ -26,13 +26,24 @@ type MultiLevelQueue[T any] struct {
 	bitmask uint16 // Bit i is 1 if queues[i] is not empty
 
 	// Global census for O(1) existence and duplicate prevention across all levels
-	census map[uint32]T
+	census map[uint64]T
+}
+
+// GenerateKey builds a unique tracking key for a packet.
+// It maps PACKET_STREAM_RESEND to PACKET_STREAM_DATA for consistent deduplication.
+func GenerateKey(streamID uint16, packetType uint8, sequenceNum uint16, fragmentID uint8) uint64 {
+	t := packetType
+	if t == 129 { // PACKET_STREAM_RESEND (Manual value to avoid circular dependency if possible, but internal/enums is usually safe)
+		t = 128 // PACKET_STREAM_DATA
+	}
+	// Key: [16bit StreamID][8bit PacketType][16bit SequenceNum][8bit FragmentID]
+	return uint64(streamID)<<40 | uint64(t)<<32 | uint64(sequenceNum)<<8 | uint64(fragmentID)
 }
 
 // New creates a new MultiLevelQueue with an initial census capacity.
 func New[T any](initialCapacity int) *MultiLevelQueue[T] {
 	m := &MultiLevelQueue[T]{
-		census: make(map[uint32]T, initialCapacity),
+		census: make(map[uint64]T, initialCapacity),
 	}
 	for i := 0; i < 6; i++ {
 		m.queues[i].Items = make([]T, 0, 16)
@@ -41,7 +52,7 @@ func New[T any](initialCapacity int) *MultiLevelQueue[T] {
 }
 
 // Push adds an item to the queue at the specified priority if the key is unique.
-func (m *MultiLevelQueue[T]) Push(priority int, key uint32, item T) bool {
+func (m *MultiLevelQueue[T]) Push(priority int, key uint64, item T) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -66,14 +77,14 @@ func (m *MultiLevelQueue[T]) Push(priority int, key uint32, item T) bool {
 }
 
 // Pop retrieves the highest priority item from the queue.
-func (m *MultiLevelQueue[T]) Pop(keyExtractor func(T) uint32) (T, int, bool) {
+func (m *MultiLevelQueue[T]) Pop(keyExtractor func(T) uint64) (T, int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	return m.popLocked(keyExtractor)
 }
 
-func (m *MultiLevelQueue[T]) popLocked(keyExtractor func(T) uint32) (T, int, bool) {
+func (m *MultiLevelQueue[T]) popLocked(keyExtractor func(T) uint64) (T, int, bool) {
 	var zero T
 	for m.bitmask != 0 {
 		// Optimized: Use hardware instruction to find highest priority (trailing zeros)
@@ -107,7 +118,7 @@ func (m *MultiLevelQueue[T]) popLocked(keyExtractor func(T) uint32) (T, int, boo
 }
 
 // Get checks if an item exists in the queue using its tracking key.
-func (m *MultiLevelQueue[T]) Get(key uint32) (T, bool) {
+func (m *MultiLevelQueue[T]) Get(key uint64) (T, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -165,7 +176,7 @@ func (m *MultiLevelQueue[T]) HighestPriority() int {
 }
 
 // PopIf retrieves the highest priority item IF and only IF it matches the given predicate condition.
-func (m *MultiLevelQueue[T]) PopIf(priority int, predicate func(T) bool, keyExtractor func(T) uint32) (T, bool) {
+func (m *MultiLevelQueue[T]) PopIf(priority int, predicate func(T) bool, keyExtractor func(T) uint64) (T, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -202,7 +213,7 @@ func (m *MultiLevelQueue[T]) PopIf(priority int, predicate func(T) bool, keyExtr
 }
 
 // PopAnyIf retrieves the highest priority item that matches the given predicate, regardless of its priority.
-func (m *MultiLevelQueue[T]) PopAnyIf(predicate func(T) bool, keyExtractor func(T) uint32) (T, bool) {
+func (m *MultiLevelQueue[T]) PopAnyIf(predicate func(T) bool, keyExtractor func(T) uint64) (T, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
