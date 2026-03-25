@@ -52,11 +52,7 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet) {
 
 	if VpnProto.IsTCPForwardSynPayload(vpnPacket.Payload) {
 		if s.cfg.ForwardIP == "" || s.cfg.ForwardPort <= 0 {
-			_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
-				PacketType:  Enums.PACKET_STREAM_RST,
-				StreamID:    vpnPacket.StreamID,
-				SequenceNum: vpnPacket.SequenceNum,
-			})
+			record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
 			return
 		}
 

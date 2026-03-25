@@ -305,24 +305,6 @@ func (s *Server) handleDNSQueryRequest(vpnPacket VpnProto.Packet, sessionRecord 
 	return true
 }
 
-func (s *Server) handleDNSQueryResponseAck(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
-	if sessionRecord == nil {
-		return false
-	}
-
-	record, ok := s.sessions.Get(vpnPacket.SessionID)
-	if !ok {
-		return false
-	}
-
-	stream, exists := record.getStream(0)
-	if !exists || stream == nil {
-		return false
-	}
-
-	return s.consumeInboundStreamAck(vpnPacket, stream)
-}
-
 func (s *Server) handleStreamSynRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || sessionRecord == nil {
 		return false

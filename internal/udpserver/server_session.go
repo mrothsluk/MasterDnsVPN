@@ -94,7 +94,7 @@ func (s *Server) logInvalidSessionDrop(reason string, sessionID uint8, receivedC
 	}
 	if expectedCookie == 0 {
 		s.log.Debugf(
-			"\U0001F44B 👋 <yellow>Sending Session Drop</yellow> <magenta>|</magenta> <blue>Reason</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan>",
+			"\U0001F44B <yellow>Sending Session Drop</yellow> <magenta>|</magenta> <blue>Reason</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan>",
 			reason,
 			sessionID,
 			receivedCookie,
@@ -163,7 +163,20 @@ func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) boo
 		return false
 	}
 
-	stream := record.getOrCreateStream(packet.StreamID, s.streamARQConfig(false, record.DownloadCompression), nil, s.log)
+	if packet.StreamID == 0 {
+		record.ensureStream0(s.log)
+		stream, exists := record.getStream(0)
+		if !exists || stream == nil {
+			return false
+		}
+		return stream.PushTXPacket(getEffectivePriority(packet.PacketType, 3), packet.PacketType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, packet.CompressionType, 0, packet.Payload)
+	}
+
+	stream, exists := record.getStream(packet.StreamID)
+	if !exists || stream == nil {
+		return false
+	}
+
 	return stream.PushTXPacket(getEffectivePriority(packet.PacketType, 3), packet.PacketType, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, packet.CompressionType, 0, packet.Payload)
 }
 
