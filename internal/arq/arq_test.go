@@ -905,6 +905,52 @@ func TestARQ_FinHandshakeWaitsForInboundWriteDrain(t *testing.T) {
 	}
 }
 
+func TestARQ_FinAckTimeoutDoesNotCompleteHandshake(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	cfg := Config{
+		WindowSize:               100,
+		RTO:                      0.1,
+		MaxRTO:                   0.5,
+		EnableControlReliability: true,
+		TerminalAckWaitTimeout:   0.1,
+	}
+
+	a := NewARQ(1, 1, enqueuer, nil, 1000, &testLogger{t}, cfg)
+	a.mu.Lock()
+	finSeq := uint16(7)
+	a.finSeqSent = &finSeq
+	a.finSent = true
+	a.finReceived = true
+	a.waitingAck = true
+	a.waitingAckFor = Enums.PACKET_STREAM_FIN
+	a.ackWaitDeadline = time.Now().Add(-10 * time.Millisecond)
+	a.controlSndBuf[uint32(Enums.PACKET_STREAM_FIN)<<24|uint32(finSeq)<<8] = &arqControlItem{
+		PacketType:  Enums.PACKET_STREAM_FIN,
+		SequenceNum: finSeq,
+		AckType:     Enums.PACKET_STREAM_FIN_ACK,
+		CreatedAt:   time.Now(),
+		LastSentAt:  time.Now(),
+		CurrentRTO:  a.controlRto,
+	}
+	a.mu.Unlock()
+
+	if a.handleTerminalRetransmitState(time.Now()) {
+		t.Fatal("expected FIN ack timeout not to finalize stream")
+	}
+	if a.IsClosed() {
+		t.Fatal("expected stream to stay open while waiting for FIN_ACK")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.waitingAck || a.waitingAckFor != Enums.PACKET_STREAM_FIN {
+		t.Fatal("expected FIN to remain tracked after ack wait timeout")
+	}
+	if _, exists := a.controlSndBuf[uint32(Enums.PACKET_STREAM_FIN)<<24|uint32(finSeq)<<8]; !exists {
+		t.Fatal("expected tracked FIN control packet to remain for retransmission")
+	}
+}
+
 func TestARQ_PeerFinThenLocalFinAckClosesWithoutRST(t *testing.T) {
 	enqueuer := NewMockPacketEnqueuer()
 	cfg := Config{

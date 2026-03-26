@@ -1482,9 +1482,11 @@ func (a *ARQ) handleTerminalRetransmitState(now time.Time) bool {
 		}
 
 		if waitingFor == Enums.PACKET_STREAM_FIN && a.finSeqSent != nil {
-			a.clearWaitingAck(Enums.PACKET_STREAM_FIN)
-			a.clearTrackedControlPacket(Enums.PACKET_STREAM_FIN, *a.finSeqSent, 0)
-			a.tryFinalizeRemoteEOF()
+			a.mu.Lock()
+			if a.waitingAck && a.waitingAckFor == Enums.PACKET_STREAM_FIN {
+				a.ackWaitDeadline = now.Add(a.terminalAckWait)
+			}
+			a.mu.Unlock()
 		}
 
 		return false
