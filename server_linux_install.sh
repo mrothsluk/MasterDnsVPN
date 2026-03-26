@@ -315,7 +315,7 @@ log_info "Starting server once to generate encryption key..."
 APP_PID=$!
 READY=false
 for _ in {1..10}; do
-  if grep -q "Encryption Key Loaded" "$TMP_LOG" 2>/dev/null; then
+  if grep -q "Active Encryption Key" "$TMP_LOG" 2>/dev/null; then
     READY=true
     break
   fi
