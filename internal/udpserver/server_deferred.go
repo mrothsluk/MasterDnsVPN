@@ -264,6 +264,11 @@ func (s *Server) processDeferredSOCKS5Syn(ctx context.Context, vpnPacket VpnProt
 	}
 
 	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(record.DownloadCompression), nil, s.log)
+	if stream == nil || stream.ARQ == nil {
+		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
+		s.finalizeStreamArtifacts(vpnPacket.SessionID, vpnPacket.StreamID)
+		return
+	}
 	target, err := SocksProto.ParseTargetPayload(assembledTarget)
 	if err != nil {
 		if !s.shouldExecuteDeferredPacket(vpnPacket) {
