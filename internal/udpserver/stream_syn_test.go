@@ -468,6 +468,32 @@ func TestDeferredSessionProcessorSessionCapRejectsExcessSingleSessionLoad(t *tes
 	}
 }
 
+func TestDeferredSessionProcessorFastFailsWhenWorkerQueueIsFull(t *testing.T) {
+	processor := newDeferredSessionProcessor(1, 1, nil)
+	if processor == nil {
+		t.Fatal("expected deferred processor")
+	}
+
+	firstLane := deferredSessionLane{sessionID: 12, streamID: 1}
+	secondLane := deferredSessionLane{sessionID: 13, streamID: 2}
+
+	if !processor.Enqueue(firstLane, func(context.Context) {}) {
+		t.Fatal("expected first task to enqueue")
+	}
+
+	if processor.Enqueue(secondLane, func(context.Context) {}) {
+		t.Fatal("expected second task to fail fast when worker queue is full")
+	}
+
+	if pending := processor.workers[0].pending.Load(); pending != 1 {
+		t.Fatalf("expected pending count to stay at 1 after fast-fail, got %d", pending)
+	}
+
+	if got := processor.sessionPending[secondLane.sessionID]; got != 0 {
+		t.Fatalf("expected rejected session pending count to be rolled back, got %d", got)
+	}
+}
+
 func TestInvalidSessionDropLogConfigRecentlyClosedIgnoresReceivedCookie(t *testing.T) {
 	key1, interval1 := invalidSessionDropLogConfig("recently closed session", 3, 10, 241, 0)
 	key2, interval2 := invalidSessionDropLogConfig("recently closed session", 3, 99, 241, 0)

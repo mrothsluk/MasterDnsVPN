@@ -247,16 +247,9 @@ func (p *deferredSessionProcessor) enqueueToExistingWorkerLocked(workerIdx int, 
 		p.maybeLogPressureLocked(workerIdx, task.lane)
 		return true
 	default:
-		p.compactWorkerLocked(workerIdx, nil)
-		select {
-		case worker.jobs <- task:
-			p.maybeLogPressureLocked(workerIdx, task.lane)
-			return true
-		default:
-			worker.pending.Add(-1)
-			p.decrementSessionPendingLocked(task.lane.sessionID)
-			return false
-		}
+		worker.pending.Add(-1)
+		p.decrementSessionPendingLocked(task.lane.sessionID)
+		return false
 	}
 }
 
@@ -269,16 +262,9 @@ func (p *deferredSessionProcessor) tryEnqueueLocked(workerIdx int, task deferred
 		p.maybeLogPressureLocked(workerIdx, task.lane)
 		return true
 	default:
-		p.compactWorkerLocked(workerIdx, nil)
-		select {
-		case worker.jobs <- task:
-			p.maybeLogPressureLocked(workerIdx, task.lane)
-			return true
-		default:
-			worker.pending.Add(-1)
-			p.decrementSessionPendingLocked(task.lane.sessionID)
-			return false
-		}
+		worker.pending.Add(-1)
+		p.decrementSessionPendingLocked(task.lane.sessionID)
+		return false
 	}
 }
 
