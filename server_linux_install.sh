@@ -320,8 +320,8 @@ stop_existing_masterdnsvpn_service() {
 }
 
 log_header "Managing Network Ports (Port 53)"
-remove_port53_forward_rules
 stop_existing_masterdnsvpn_service
+remove_port53_forward_rules
 
 if check_port53; then
   log_warn "Port 53 is occupied. Trying auto-cleanup..."
