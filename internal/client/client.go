@@ -43,7 +43,7 @@ type Client struct {
 	successMTUChecks    bool
 	udpBufferPool       sync.Pool
 	resolverConnsMu     sync.Mutex
-	resolverConns       map[string]chan *net.UDPConn
+	resolverConns       map[string]chan pooledUDPConn
 	resolverAddrMu      sync.RWMutex
 	resolverAddrCache   map[string]*net.UDPAddr
 	resolverStatsMu     sync.RWMutex
@@ -223,7 +223,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 				return make([]byte, RuntimeUDPReadBufferSize)
 			},
 		},
-		resolverConns:                         make(map[string]chan *net.UDPConn),
+		resolverConns:                         make(map[string]chan pooledUDPConn),
 		resolverAddrCache:                     make(map[string]*net.UDPAddr),
 		resolverPending:                       make(map[resolverSampleKey]resolverSample),
 		resolverHealth:                        make(map[string]*resolverHealthState),
