@@ -40,6 +40,14 @@ type resolverRecheckCandidate struct {
 	runtimePriority bool
 }
 
+type resolverAutoDisableCandidate struct {
+	key            string
+	eventCount     int
+	span           time.Duration
+	oldestAge      time.Duration
+	timeoutOnlyAge time.Duration
+}
+
 func (c *Client) resolverHealthDebugEnabled() bool {
 	return c != nil && c.log != nil && c.log.Enabled(logger.LevelDebug)
 }
@@ -265,17 +273,18 @@ func (c *Client) runResolverAutoDisable(now time.Time) {
 	}
 
 	window := c.autoDisableTimeoutWindow()
-	candidates := make([]string, 0, len(c.connections))
+	debugEnabled := c.resolverHealthDebugEnabled()
+	candidates := make([]resolverAutoDisableCandidate, 0, len(c.connections))
+	snap := c.resolverHealthBalancerSnapshot()
 	c.resolverHealthMu.Lock()
 	for key, state := range c.resolverHealth {
 		if state == nil {
 			continue
 		}
-		conn, ok := c.GetConnectionByKey(key)
-		if !ok || !conn.IsValid {
+		c.pruneResolverHealthLocked(state, now)
+		if !c.resolverConnectionIsValidFromSnapshot(snap, key) {
 			continue
 		}
-		c.pruneResolverHealthLocked(state, now)
 		if len(state.Events) < c.autoDisableMinObservations() {
 			continue
 		}
@@ -286,28 +295,56 @@ func (c *Client) runResolverAutoDisable(now time.Time) {
 		if timeoutOnlyAge < window {
 			continue
 		}
-		if c.resolverHealthDebugEnabled() {
-			span := state.Events[len(state.Events)-1].At.Sub(state.Events[0].At)
-			oldestAge := now.Sub(state.Events[0].At)
-			c.log.Debugf(
-				"\U0001F6A8 <yellow>Resolver auto-disable candidate</yellow> <magenta>|</magenta> <blue>Resolver</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Events</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Span</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>OldestAge</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>TimeoutOnlyAge</blue>: <cyan>%s</cyan>",
-				key,
-				len(state.Events),
-				span.Round(time.Millisecond),
-				oldestAge.Round(time.Millisecond),
-				timeoutOnlyAge.Round(time.Millisecond),
-			)
+		candidate := resolverAutoDisableCandidate{key: key}
+		if debugEnabled {
+			candidate.eventCount = len(state.Events)
+			candidate.span = state.Events[len(state.Events)-1].At.Sub(state.Events[0].At)
+			candidate.oldestAge = now.Sub(state.Events[0].At)
+			candidate.timeoutOnlyAge = timeoutOnlyAge
 		}
-		candidates = append(candidates, key)
+		candidates = append(candidates, candidate)
 	}
 	c.resolverHealthMu.Unlock()
 
-	for _, key := range candidates {
+	if debugEnabled {
+		for _, candidate := range candidates {
+			c.log.Debugf(
+				"\U0001F6A8 <yellow>Resolver auto-disable candidate</yellow> <magenta>|</magenta> <blue>Resolver</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Events</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Span</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>OldestAge</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>TimeoutOnlyAge</blue>: <cyan>%s</cyan>",
+				candidate.key,
+				candidate.eventCount,
+				candidate.span.Round(time.Millisecond),
+				candidate.oldestAge.Round(time.Millisecond),
+				candidate.timeoutOnlyAge.Round(time.Millisecond),
+			)
+		}
+	}
+
+	for _, candidate := range candidates {
 		if c.balancer.ValidCount() <= 3 {
 			return
 		}
-		c.disableResolverConnection(key, "100% timeout window")
+		c.disableResolverConnection(candidate.key, "100% timeout window")
 	}
+}
+
+func (c *Client) resolverHealthBalancerSnapshot() *balancerSnapshot {
+	if c == nil || c.balancer == nil {
+		return nil
+	}
+	return c.balancer.snapshot.Load()
+}
+
+func (c *Client) resolverConnectionIsValidFromSnapshot(snap *balancerSnapshot, key string) bool {
+	if snap != nil {
+		idx, ok := snap.indexByKey[key]
+		if !ok || idx < 0 || idx >= len(snap.connections) {
+			return false
+		}
+		return snap.connections[idx].IsValid
+	}
+
+	conn, ok := c.GetConnectionByKey(key)
+	return ok && conn.IsValid
 }
 
 func (c *Client) disableResolverConnection(serverKey string, cause string) bool {
