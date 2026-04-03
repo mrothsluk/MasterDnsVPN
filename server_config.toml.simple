@@ -46,11 +46,11 @@ UDP_PORT = 53
 
 # Number of UDP reader goroutines.
 # If <= 0, code falls back to an auto default.
-UDP_READERS = 6
+UDP_READERS = 7
 
 # Number of DNS request workers that process incoming packets.
 # If <= 0, code falls back to an auto default.
-DNS_REQUEST_WORKERS = 6
+DNS_REQUEST_WORKERS = 7
 
 # Maximum queued requests waiting behind request workers.
 # If the queue is full, packets are dropped and rate-limited overload logs appear.

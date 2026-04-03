@@ -34,7 +34,6 @@ type asyncReadPacket struct {
 func (c *Client) StopAsyncRuntime() {
 	if c.asyncCancel != nil {
 		c.log.Debugf("\U0001F6D1 <yellow>Stopping Async Runtime...</yellow>")
-		c.CloseAllStreams()
 		c.asyncCancel()
 		c.asyncWG.Wait()
 		c.asyncCancel = nil
