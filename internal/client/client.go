@@ -185,8 +185,8 @@ type Connection struct {
 
 // Bootstrap initializes a new Client by loading configuration, setting up logging,
 // and preparing the connection map.
-func Bootstrap(configPath string, logPath string) (*Client, error) {
-	cfg, err := config.LoadClientConfig(configPath)
+func Bootstrap(configPath string, logPath string, overrides config.ClientConfigOverrides) (*Client, error) {
+	cfg, err := config.LoadClientConfigWithOverrides(configPath, overrides)
 	if err != nil {
 		return nil, err
 	}
