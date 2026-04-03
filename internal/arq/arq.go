@@ -305,14 +305,14 @@ type CloseOptions struct {
 }
 
 func (a *ARQ) IsClosed() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.closed
 }
 
 func (a *ARQ) State() StreamState {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.state
 }
 
@@ -613,8 +613,8 @@ func (a *ARQ) setState(newState StreamState) {
 }
 
 func (a *ARQ) closeReadReceivedLocked() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.closeReadReceived
 }
 
@@ -1676,6 +1676,7 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 	now := time.Now()
 	a.lastActivity = now
 	handled := false
+	shouldSignalWindow := false
 	var sample time.Duration
 	sampleEligible := false
 
@@ -1686,11 +1687,15 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 		}
 		delete(a.sndBuf, sn)
 		if len(a.sndBuf) < a.limit {
-			a.signalWindowNotFull()
+			shouldSignalWindow = true
 		}
 		handled = true
 	}
 	a.mu.Unlock()
+
+	if shouldSignalWindow {
+		a.signalWindowNotFull()
+	}
 
 	if handled {
 		if sampleEligible {
@@ -2100,20 +2105,20 @@ func (a *ARQ) checkRetransmits() {
 		return
 	}
 
-	a.mu.Lock()
+	a.mu.RLock()
 	var jobs []rtxJob
+	var ttlExpired bool
+	var retryExceeded bool
 
 	for sn, info := range a.sndBuf {
 		if info.TTL > 0 {
 			if now.Sub(info.CreatedAt) >= info.TTL {
-				a.mu.Unlock()
-				a.handleTrackedPacketTTLExpiry(Enums.PACKET_STREAM_DATA, "Packet TTL expired")
-				return
+				ttlExpired = true
+				break
 			}
 		} else if now.Sub(info.CreatedAt) >= a.dataPacketTTL && info.Retries >= a.maxDataRetries {
-			a.mu.Unlock()
-			a.Close("Max retransmissions exceeded", CloseOptions{SendRST: true})
-			return
+			retryExceeded = true
+			break
 		}
 
 		if !info.Dispatched || now.Sub(info.LastSentAt) < info.CurrentRTO {
@@ -2126,7 +2131,16 @@ func (a *ARQ) checkRetransmits() {
 			compressionType: info.CompressionType,
 		})
 	}
-	a.mu.Unlock()
+	a.mu.RUnlock()
+
+	if ttlExpired {
+		a.handleTrackedPacketTTLExpiry(Enums.PACKET_STREAM_DATA, "Packet TTL expired")
+		return
+	}
+	if retryExceeded {
+		a.Close("Max retransmissions exceeded", CloseOptions{SendRST: true})
+		return
+	}
 
 	priorityKinds := a.retransmitPriorityKinds(jobs)
 	for i, j := range jobs {
