@@ -210,11 +210,11 @@ type ARQ struct {
 	lastDataNackSent  map[uint16]time.Time
 
 	// Concurrency
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	flushSignal    chan struct{}
-	rxChan         chan rxPayload
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	flushSignal chan struct{}
+	rxChan      chan rxPayload
 	pendingInbound int
 }
 
@@ -1338,23 +1338,47 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) bool {
 func (a *ARQ) rxLoop() {
 	defer a.wg.Done()
 
+	const maxBatch = 64
+	batch := make([]rxPayload, 0, maxBatch)
+
 	for {
+		// Wait for at least one packet.
 		select {
 		case <-a.ctx.Done():
 			return
 		case payload := <-a.rxChan:
-			a.processReceivedData(payload.sn, payload.data)
+			batch = append(batch[:0], payload)
 		}
+
+		// Non-blocking drain of any additional queued packets.
+		for len(batch) < maxBatch {
+			select {
+			case payload := <-a.rxChan:
+				batch = append(batch, payload)
+			default:
+				goto processBatch
+			}
+		}
+
+	processBatch:
+		a.processReceivedDataBatch(batch)
 	}
 }
 
-func (a *ARQ) processReceivedData(sn uint16, data []byte) {
+// processReceivedDataBatch handles a batch of inbound data packets under a
+// single lock acquisition. ACKs are still emitted per-packet (the server
+// needs each), but NACK scanning and flush signaling happen once per batch.
+func (a *ARQ) processReceivedDataBatch(batch []rxPayload) {
 	now := time.Now()
 
 	a.mu.Lock()
-	if a.pendingInbound > 0 {
-		a.pendingInbound--
+	batchSize := len(batch)
+	if a.pendingInbound >= batchSize {
+		a.pendingInbound -= batchSize
+	} else {
+		a.pendingInbound = 0
 	}
+
 	if a.localWriterBroken || a.closeWriteSent || a.closeWriteAcked {
 		needCloseWrite := a.localWriterBroken &&
 			!a.closeWriteSent &&
@@ -1362,7 +1386,6 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 			!a.closed &&
 			!a.rstReceived &&
 			!a.rstSent
-
 		a.mu.Unlock()
 		if needCloseWrite {
 			a.Close("Inbound data received after local writer closed", CloseOptions{SendCloseWrite: true})
@@ -1371,51 +1394,82 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 	}
 
 	a.lastActivity = now
-	diff := sn - a.rcvNxt
 
-	if diff >= 32768 {
-		a.mu.Unlock()
-		a.enqueuer.PushTXPacket(
-			Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK),
-			Enums.PACKET_STREAM_DATA_ACK,
-			sn, 0, 0, 0, 0, nil,
-		)
-		return
+	// Categorize each packet while holding the lock.
+	type rxResult struct {
+		sn      uint16
+		ack     bool // needs ACK
+		isNew   bool // newly inserted (not duplicate)
+		oldWrap bool // old/wrapped sn — ACK but don't insert
 	}
+	results := make([]rxResult, len(batch))
 
-	if int(diff) > a.windowSize {
-		a.mu.Unlock()
-		return
-	}
+	for i, pkt := range batch {
+		sn := pkt.sn
+		diff := sn - a.rcvNxt
 
-	_, exists := a.rcvBuf[sn]
-	if !exists && len(a.rcvBuf) >= a.windowSize && sn != a.rcvNxt {
-		a.mu.Unlock()
-		return
-	}
+		if diff >= 32768 {
+			// Old/wrapped sequence — still ACK it so sender can free sndBuf
+			results[i] = rxResult{sn: sn, ack: true, oldWrap: true}
+			continue
+		}
 
-	if !exists {
-		a.rcvBuf[sn] = data
+		if int(diff) > a.windowSize {
+			// Beyond receive window — silently drop
+			results[i] = rxResult{sn: sn}
+			continue
+		}
+
+		_, exists := a.rcvBuf[sn]
+		if !exists && len(a.rcvBuf) >= a.windowSize && sn != a.rcvNxt {
+			// Window full and not the expected next — drop
+			results[i] = rxResult{sn: sn}
+			continue
+		}
+
+		if !exists {
+			a.rcvBuf[sn] = pkt.data
+			results[i] = rxResult{sn: sn, ack: true, isNew: true}
+		} else {
+			// Duplicate — ACK it (sender may have retransmitted) but skip NACK work
+			results[i] = rxResult{sn: sn, ack: true}
+		}
 	}
 	a.mu.Unlock()
 
-	a.clearSentDataNack(sn)
+	// Emit ACKs and clear NACKs outside the lock.
+	ackPriority := Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK)
+	var highestSN uint16
+	hasAcked := false
+	for _, r := range results {
+		if r.ack {
+			a.enqueuer.PushTXPacket(
+				ackPriority,
+				Enums.PACKET_STREAM_DATA_ACK,
+				r.sn, 0, 0, 0, 0, nil,
+			)
+			// Track highest ACKed sn for a single NACK scan at the end.
+			if !hasAcked || (r.sn-highestSN) < 32768 {
+				highestSN = r.sn
+			}
+			hasAcked = true
+		}
+		if r.isNew {
+			a.clearSentDataNack(r.sn)
+		}
+	}
 
-	a.enqueuer.PushTXPacket(
-		Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK),
-		Enums.PACKET_STREAM_DATA_ACK,
-		sn, 0, 0, 0, 0, nil,
-	)
-
-	a.maybeSendDataNacks(sn)
-	a.signalFlushReady()
+	// One NACK scan and one flush signal per batch instead of per-packet.
+	if hasAcked {
+		a.maybeSendDataNacks(highestSN)
+		a.signalFlushReady()
+	}
 }
 func (a *ARQ) writeLoop() {
 	defer a.wg.Done()
 
-	const maxRetainedMergeBuf = 256 * 1024
-
-	var mergeBuf []byte // reusable merge buffer across iterations
+	var mergeBuf []byte     // reusable merge buffer across iterations
+	toWrite := make([][]byte, 0, 16) // reusable slice for contiguous chunks
 
 	for {
 		// Check rcvBuf before blocking — signals may have been coalesced
@@ -1452,7 +1506,7 @@ func (a *ARQ) writeLoop() {
 				return
 			}
 
-			var toWrite [][]byte
+			toWrite = toWrite[:0]
 			for {
 				data, exists := a.rcvBuf[a.rcvNxt]
 				if !exists {
@@ -1484,23 +1538,16 @@ func (a *ARQ) writeLoop() {
 				for _, chunk := range toWrite {
 					totalSize += len(chunk)
 				}
-
-				merged := mergeBuf
-				if totalSize <= maxRetainedMergeBuf {
-					if cap(merged) >= totalSize {
-						merged = merged[:0]
-					} else {
-						merged = make([]byte, 0, totalSize)
-					}
-					mergeBuf = merged
+				if cap(mergeBuf) >= totalSize {
+					mergeBuf = mergeBuf[:0]
 				} else {
-					merged = make([]byte, 0, totalSize)
+					mergeBuf = make([]byte, 0, totalSize)
 				}
 				for _, chunk := range toWrite {
-					merged = append(merged, chunk...)
+					mergeBuf = append(mergeBuf, chunk...)
 				}
 				toWrite = toWrite[:1]
-				toWrite[0] = merged
+				toWrite[0] = mergeBuf
 			}
 
 			shouldExit := false
