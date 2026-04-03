@@ -446,6 +446,12 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 	defer c.asyncWG.Done()
 	c.log.Debugf("\U0001F680 <green>Writer Worker <cyan>#%d</cyan> started</green>", id)
 	var lastDeadline time.Time
+	defaultDomain := ""
+	if len(c.cfg.Domains) > 0 {
+		defaultDomain = c.cfg.Domains[0]
+	}
+
+	var packetByDomain map[string][]byte
 	refreshWindow := c.tunnelPacketTimeout / 2
 	if refreshWindow < 250*time.Millisecond {
 		refreshWindow = 250 * time.Millisecond
@@ -479,13 +485,20 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 			var (
 				firstDomain    string
 				firstDNSPacket []byte
-				packetByDomain map[string][]byte
 			)
+			if packetByDomain != nil {
+				clear(packetByDomain)
+			}
 
 			for _, resolverConn := range conns {
 				domain := resolverConn.Domain
 				if domain == "" {
-					domain = c.cfg.Domains[0]
+					domain = defaultDomain
+				}
+
+				addr, err := c.getResolverUDPAddr(resolverConn)
+				if err != nil {
+					continue
 				}
 
 				var dnsPacket []byte
@@ -514,22 +527,16 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 					}
 				}
 
-				addr, err := c.getResolverUDPAddr(resolverConn)
-				if err != nil {
-					continue
-				}
-
+				now := time.Now()
 				if c.tunnelPacketTimeout > 0 {
-					now := time.Now()
 					if lastDeadline.IsZero() || now.Add(refreshWindow).After(lastDeadline) {
 						lastDeadline = now.Add(c.tunnelPacketTimeout)
 						_ = conn.SetWriteDeadline(lastDeadline)
 					}
 				}
 
-				sentAt := time.Now()
 				if _, err := conn.WriteToUDP(dnsPacket, addr); err == nil {
-					c.trackResolverSend(dnsPacket, addr.String(), resolverConn.Key, sentAt)
+					c.trackResolverSend(dnsPacket, addr.String(), resolverConn.Key, now)
 				}
 			}
 
