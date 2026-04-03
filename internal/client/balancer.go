@@ -42,6 +42,8 @@ type connectionStats struct {
 	rttCount     uint64
 }
 
+const connectionStatsHalfLifeThreshold = 1000
+
 type balancerSnapshot struct {
 	version     uint64
 	connections []Connection
@@ -228,6 +230,7 @@ func (b *Balancer) ReportSend(serverKey string) {
 	if stats := b.statsForKey(serverKey); stats != nil {
 		stats.mu.Lock()
 		stats.sent++
+		stats.applyHalfLifeLocked()
 		stats.mu.Unlock()
 	}
 }
@@ -244,16 +247,7 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 		stats.rttMicrosSum += uint64(rtt / time.Microsecond)
 		stats.rttCount++
 	}
-
-	if stats.sent <= 1000 {
-		stats.mu.Unlock()
-		return
-	}
-
-	stats.sent /= 2
-	stats.acked /= 2
-	stats.rttMicrosSum /= 2
-	stats.rttCount /= 2
+	stats.applyHalfLifeLocked()
 	stats.mu.Unlock()
 }
 
@@ -679,6 +673,22 @@ func (s *connectionStats) snapshot() (sent uint64, acked uint64, rttMicrosSum ui
 	rttCount = s.rttCount
 	s.mu.RUnlock()
 	return sent, acked, rttMicrosSum, rttCount
+}
+
+func (s *connectionStats) applyHalfLifeLocked() {
+	if s == nil {
+		return
+	}
+	if s.sent <= connectionStatsHalfLifeThreshold &&
+		s.acked <= connectionStatsHalfLifeThreshold &&
+		s.rttCount <= connectionStatsHalfLifeThreshold {
+		return
+	}
+
+	s.sent /= 2
+	s.acked /= 2
+	s.rttMicrosSum /= 2
+	s.rttCount /= 2
 }
 
 func (b *Balancer) nextRandom() uint64 {
