@@ -9,6 +9,7 @@ package dnsparser
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
@@ -362,5 +363,23 @@ func TestBuildTunnelTXTQuestionPacketPreparedMatchesDirectBuilder(t *testing.T) 
 	}
 	if !bytes.Equal(direct[2:], prepared[2:]) {
 		t.Fatal("prepared tunnel question packet differs from direct builder output")
+	}
+}
+
+func TestBuildTXTQuestionPacketUsesDistinctRequestIDs(t *testing.T) {
+	first, err := BuildTXTQuestionPacket("x.v.example.com", Enums.DNS_RECORD_TYPE_TXT, 4096)
+	if err != nil {
+		t.Fatalf("BuildTXTQuestionPacket returned error: %v", err)
+	}
+
+	second, err := BuildTXTQuestionPacket("x.v.example.com", Enums.DNS_RECORD_TYPE_TXT, 4096)
+	if err != nil {
+		t.Fatalf("BuildTXTQuestionPacket returned error: %v", err)
+	}
+
+	firstID := binary.BigEndian.Uint16(first[0:2])
+	secondID := binary.BigEndian.Uint16(second[0:2])
+	if firstID == secondID {
+		t.Fatalf("expected distinct request ids, got identical id %d", firstID)
 	}
 }

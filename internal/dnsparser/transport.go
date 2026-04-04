@@ -8,10 +8,12 @@
 package dnsparser
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	baseCodec "masterdnsvpn-go/internal/basecodec"
@@ -779,8 +781,15 @@ func encodedQNameLen(encodedChars int, domainLen int) int {
 }
 
 var dnsIDCounter atomic.Uint32
+var dnsIDInit sync.Once
 
 func nextDNSRequestID() uint16 {
+	dnsIDInit.Do(func() {
+		var seed [4]byte
+		if _, err := rand.Read(seed[:]); err == nil {
+			dnsIDCounter.Store(uint32(binary.BigEndian.Uint32(seed[:])))
+		}
+	})
 	return uint16(dnsIDCounter.Add(1))
 }
 
