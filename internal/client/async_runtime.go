@@ -25,8 +25,9 @@ import (
 const clientRXDropLogInterval = 2 * time.Second
 
 type asyncReadPacket struct {
-	data []byte
-	addr *net.UDPAddr
+	data      []byte
+	addr      *net.UDPAddr
+	localAddr string
 }
 
 // StopAsyncRuntime stops all running workers (Readers, Writers, Processors).
@@ -35,6 +36,7 @@ func (c *Client) StopAsyncRuntime() {
 	if c.asyncCancel != nil {
 		c.log.Debugf("\U0001F6D1 <yellow>Stopping Async Runtime...</yellow>")
 		c.asyncCancel()
+		c.closeTunnelSockets()
 		c.asyncWG.Wait()
 		c.asyncCancel = nil
 
@@ -51,10 +53,7 @@ func (c *Client) StopAsyncRuntime() {
 		c.dnsListener.Stop()
 	}
 
-	if c.tunnelConn != nil {
-		_ = c.tunnelConn.Close()
-		c.tunnelConn = nil
-	}
+	c.closeTunnelSockets()
 
 	if c.pingManager != nil {
 		c.pingManager.Stop()
@@ -244,23 +243,27 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 			c.dnsListener.Stop()
 			c.dnsListener = nil
 		}
-		if c.tunnelConn != nil {
-			_ = c.tunnelConn.Close()
-			c.tunnelConn = nil
-		}
+		c.closeTunnelSockets()
 		c.asyncCancel = nil
 		c.resetRuntimeBindings(false)
 	}()
 
-	// 3. Open shared UDP socket.
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		cancel()
-		c.asyncCancel = nil
-		return fmt.Errorf("failed to open tunnel socket: %w", err)
+	// 3. Open dedicated UDP sockets for each RX/TX worker.
+	conns := make([]*net.UDPConn, 0, c.tunnelRX_TX_Workers)
+	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if err != nil {
+			for _, opened := range conns {
+				_ = opened.Close()
+			}
+			cancel()
+			c.asyncCancel = nil
+			return fmt.Errorf("failed to open tunnel socket %d/%d: %w", i+1, c.tunnelRX_TX_Workers, err)
+		}
+		conns = append(conns, conn)
 	}
 
-	c.tunnelConn = conn
+	c.tunnelConns = conns
 
 	c.log.Infof("\U0001F4E1 <cyan>Async Runtime Initialized: <green>%d RX/TX Workers</green>, <green>%d Processors</green></cyan>",
 		c.tunnelRX_TX_Workers, c.tunnelProcessWorkers)
@@ -284,7 +287,7 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	// 6. Spawn Reader Workers (High-speed ingestion)
 	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
 		c.asyncWG.Add(1)
-		go c.asyncReaderWorker(runtimeCtx, i, conn)
+		go c.asyncReaderWorker(runtimeCtx, i, conns[i])
 	}
 
 	// 5. Spawn Processor Workers (Parallel data analysis)
@@ -296,7 +299,7 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	// 6. Spawn Writer Workers (Burst transmission)
 	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
 		c.asyncWG.Add(1)
-		go c.asyncWriterWorker(runtimeCtx, i, conn)
+		go c.asyncWriterWorker(runtimeCtx, i, conns[i])
 	}
 
 	// 7. Spawn Dispatcher (Fair Queuing & Packing)
@@ -314,14 +317,6 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	go func() {
 		defer c.asyncWG.Done()
 		c.runResolverHealthLoop(runtimeCtx)
-	}()
-
-	// 10. Lifecycle cleanup.
-	c.asyncWG.Add(1)
-	go func() {
-		defer c.asyncWG.Done()
-		<-runtimeCtx.Done()
-		conn.Close()
 	}()
 
 	started = true
@@ -440,6 +435,18 @@ drainRX:
 	}
 }
 
+func (c *Client) closeTunnelSockets() {
+	if c == nil || len(c.tunnelConns) == 0 {
+		return
+	}
+	for _, conn := range c.tunnelConns {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}
+	c.tunnelConns = nil
+}
+
 // asyncWriterWorker encodes, builds DNS questions, and writes packets to the destination.
 func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPConn) {
 	defer c.asyncWG.Done()
@@ -452,6 +459,11 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 
 	var packetByDomain map[string][]byte
 	var preparedDomainByName map[string]preparedTunnelDomain
+	localAddr := ""
+	if conn != nil && conn.LocalAddr() != nil {
+		localAddr = conn.LocalAddr().String()
+	}
+
 	refreshWindow := c.tunnelPacketTimeout / 2
 	if refreshWindow < 250*time.Millisecond {
 		refreshWindow = 250 * time.Millisecond
@@ -551,7 +563,7 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 				}
 
 				if _, err := conn.WriteToUDP(dnsPacket, addr); err == nil {
-					c.trackResolverSend(dnsPacket, addr.String(), resolverConn.Key, now)
+					c.trackResolverSend(dnsPacket, addr.String(), localAddr, resolverConn.Key, now)
 				}
 			}
 
@@ -566,6 +578,11 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPConn) {
 	defer c.asyncWG.Done()
 	c.log.Debugf("\U0001F442 <green>Reader Worker <cyan>#%d</cyan> started</green>", id)
+	localAddr := ""
+	if conn != nil && conn.LocalAddr() != nil {
+		localAddr = conn.LocalAddr().String()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -597,7 +614,7 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 			packetData := buf[:n]
 
 			select {
-			case c.rxChannel <- asyncReadPacket{data: packetData, addr: addr}:
+			case c.rxChannel <- asyncReadPacket{data: packetData, addr: addr, localAddr: localAddr}:
 			default:
 				// Queue full! Drop packet and RECYCLE buffer.
 				c.udpBufferPool.Put(buf)
@@ -616,7 +633,7 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 		case <-ctx.Done():
 			return
 		case pkt := <-c.rxChannel:
-			c.handleInboundPacket(pkt.data, pkt.addr)
+			c.handleInboundPacket(pkt.data, pkt.addr, pkt.localAddr)
 
 			// RECYCLE buffer back to the pool.
 			c.udpBufferPool.Put(pkt.data[:cap(pkt.data)])
@@ -625,7 +642,7 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 }
 
 // handleInboundPacket is the central entry point for all received tunnel packets.
-func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
+func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr string) {
 	// c.log.Debugf("Inbound packet from %v (%d bytes)", addr, len(data))
 
 	// 1. Extract VPN Packet from DNS Response
@@ -634,9 +651,9 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()
 			if parsed, parseErr := DnsParser.ParsePacketLite(data); parseErr == nil && parsed.Header.RCode != 0 {
-				c.trackResolverFailure(data, addr, receivedAt)
+				c.trackResolverFailure(data, addr, localAddr, receivedAt)
 			} else {
-				c.trackResolverSuccess(data, addr, receivedAt)
+				c.trackResolverSuccess(data, addr, localAddr, receivedAt)
 			}
 			// summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
 			// c.log.Debugf("DNS response from %v had no tunnel TXT payload | %s", addr, summary)
@@ -646,7 +663,7 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	c.trackResolverSuccess(data, addr, time.Now())
+	c.trackResolverSuccess(data, addr, localAddr, time.Now())
 	// if c.log != nil && c.log.Enabled(logger.LevelDebug) && vpnPacket.PacketType != Enums.PACKET_PONG {
 	// 	if vpnPacket.PacketType == Enums.PACKET_STREAM_DATA_ACK {
 	// 		c.log.Debugf("Client received ACK | Stream: %d | Seq: %d", vpnPacket.StreamID, vpnPacket.SequenceNum)

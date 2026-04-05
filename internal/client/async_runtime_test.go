@@ -138,7 +138,7 @@ func TestTrackResolverSendBoundsResolverPendingGrowth(t *testing.T) {
 	c.resolverStatsMu.Unlock()
 
 	packet := []byte{0x12, 0x34}
-	c.trackResolverSend(packet, "127.0.0.1:5300", "resolver-a", base)
+	c.trackResolverSend(packet, "127.0.0.1:5300", "", "resolver-a", base)
 
 	c.resolverStatsMu.RLock()
 	pendingCount := len(c.resolverPending)
@@ -254,9 +254,10 @@ func TestStartAsyncRuntime(t *testing.T) {
 		return
 	}
 
-	if c.tunnelConn == nil {
-		t.Error("expected tunnelConn not nil")
+	if len(c.tunnelConns) != c.tunnelRX_TX_Workers {
+		t.Fatalf("expected %d tunnel sockets, got %d", c.tunnelRX_TX_Workers, len(c.tunnelConns))
 	}
+
 	if c.asyncCancel == nil {
 		t.Error("expected asyncCancel not nil")
 	}
@@ -279,8 +280,8 @@ func TestStartAsyncRuntimeCleansUpOnListenerStartFailure(t *testing.T) {
 	if c.asyncCancel != nil {
 		t.Fatal("expected asyncCancel to be cleared after startup failure")
 	}
-	if c.tunnelConn != nil {
-		t.Fatal("expected tunnelConn to be closed after startup failure")
+	if len(c.tunnelConns) != 0 {
+		t.Fatal("expected tunnel sockets to be closed after startup failure")
 	}
 }
 
@@ -353,7 +354,7 @@ func TestHandleInboundPacketTreatsMissingTXTAsResolverSuccess(t *testing.T) {
 		sentAt:    time.Now().Add(-200 * time.Millisecond),
 	}
 
-	c.handleInboundPacket(response, addr)
+	c.handleInboundPacket(response, addr, "")
 
 	if len(c.resolverPending) != 0 {
 		t.Fatalf("expected resolverPending to be cleared after empty DNS success, got=%d", len(c.resolverPending))
@@ -383,7 +384,7 @@ func TestHandleInboundPacketTreatsServerFailureWithoutTXTAsResolverFailure(t *te
 		sentAt:    time.Now().Add(-200 * time.Millisecond),
 	}
 
-	c.handleInboundPacket(response, addr)
+	c.handleInboundPacket(response, addr, "")
 
 	if len(c.resolverPending) != 0 {
 		t.Fatalf("expected resolverPending to be cleared after SERVFAIL response, got=%d", len(c.resolverPending))
