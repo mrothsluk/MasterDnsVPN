@@ -219,7 +219,7 @@ func (c *Client) enqueueOrphanReset(packetType uint8, streamID uint16, sequenceN
 	c.orphanQueue.Push(0, key, packet)
 
 	select {
-	case c.txSignal <- struct{}{}:
+	case c.dispatchSignal <- struct{}{}:
 	default:
 	}
 }

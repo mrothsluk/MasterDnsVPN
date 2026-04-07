@@ -250,7 +250,7 @@ func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum
 	}
 
 	select {
-	case s.client.txSignal <- struct{}{}:
+	case s.client.dispatchSignal <- struct{}{}:
 	default:
 	}
 

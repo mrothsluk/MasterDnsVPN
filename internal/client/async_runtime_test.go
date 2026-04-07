@@ -29,7 +29,6 @@ func createTestClient(t *testing.T) *Client {
 		Resolvers: []config.ResolverAddress{
 			{IP: "8.8.8.8", Port: 53},
 		},
-		TXChannelSize:        10,
 		RXChannelSize:        10,
 		RX_TX_Workers:        1,
 		TunnelProcessWorkers: 1,
@@ -80,32 +79,32 @@ func TestResetRuntimeBindings(t *testing.T) {
 	}
 }
 
-func TestClearTxSignal(t *testing.T) {
+func TestClearDispatchSignal(t *testing.T) {
 	c := createTestClient(t)
-	c.txSignal = make(chan struct{}, 5)
-	c.txSignal <- struct{}{}
-	c.txSignal <- struct{}{}
+	c.dispatchSignal = make(chan struct{}, 5)
+	c.dispatchSignal <- struct{}{}
+	c.dispatchSignal <- struct{}{}
 
-	c.clearTxSignal()
+	c.clearDispatchSignal()
 
 	select {
-	case <-c.txSignal:
-		t.Fatal("txSignal should be empty")
+	case <-c.dispatchSignal:
+		t.Fatal("dispatchSignal should be empty")
 	default:
 	}
 }
 
-func TestClearTxSpaceSignal(t *testing.T) {
+func TestClearEncodeQueueSpaceSignal(t *testing.T) {
 	c := createTestClient(t)
-	c.txSpaceSignal = make(chan struct{}, 5)
-	c.txSpaceSignal <- struct{}{}
-	c.txSpaceSignal <- struct{}{}
+	c.encodeQueueSpaceSignal = make(chan struct{}, 5)
+	c.encodeQueueSpaceSignal <- struct{}{}
+	c.encodeQueueSpaceSignal <- struct{}{}
 
-	c.clearTxSpaceSignal()
+	c.clearEncodeQueueSpaceSignal()
 
 	select {
-	case <-c.txSpaceSignal:
-		t.Fatal("txSpaceSignal should be empty")
+	case <-c.encodeQueueSpaceSignal:
+		t.Fatal("encodeQueueSpaceSignal should be empty")
 	default:
 	}
 }
@@ -158,18 +157,18 @@ func TestTrackResolverSendBoundsResolverPendingGrowth(t *testing.T) {
 
 func TestDrainQueues(t *testing.T) {
 	c := createTestClient(t)
-	c.txChannel = make(chan rawOutboundTask, 5)
+	c.encodeQueue = make(chan encodeTask, 5)
 	c.encodedTXChannel = make(chan encodedOutboundTask, 5)
 	c.rxChannel = make(chan asyncReadPacket, 5)
 
-	c.txChannel <- rawOutboundTask{}
+	c.encodeQueue <- encodeTask{}
 	c.encodedTXChannel <- encodedOutboundTask{}
 	c.rxChannel <- asyncReadPacket{data: make([]byte, 10)}
 
 	c.drainQueues()
 
-	if len(c.txChannel) != 0 {
-		t.Errorf("expected txChannel empty, got %d", len(c.txChannel))
+	if len(c.encodeQueue) != 0 {
+		t.Errorf("expected encodeQueue empty, got %d", len(c.encodeQueue))
 	}
 	if len(c.encodedTXChannel) != 0 {
 		t.Errorf("expected encodedTXChannel empty, got %d", len(c.encodedTXChannel))

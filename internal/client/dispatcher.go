@@ -16,17 +16,8 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-func (c *Client) selectTargetConnections(packetType uint8, streamID uint16) []Connection {
-	connections, err := c.selectTargetConnectionsForPacket(packetType, streamID)
-	if err != nil {
-		return nil
-	}
-
-	return connections
-}
-
-// asyncStreamDispatcher cycles through all active streams using a fair Round-Robin algorithm
-// and transmits the highest priority packets to the TX workers, packing control blocks when possible.
+// asyncStreamDispatcher cycles through all active streams using a fair
+// round-robin algorithm and hands prepared tasks to the encode queue.
 func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 	c.log.Debugf("Stream Dispatcher started")
 	defer c.asyncWG.Done()
@@ -43,8 +34,8 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return false
-		case <-c.txSignal:
-		case <-c.txSpaceSignal:
+		case <-c.dispatchSignal:
+		case <-c.encodeQueueSpaceSignal:
 		case <-idleTimer.C:
 		}
 		if !idleTimer.Stop() {
@@ -57,19 +48,19 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 		return true
 	}
 
-	waitForTxCapacity := func(required int) bool {
+	waitForEncodeCapacity := func(required int) bool {
 		if required <= 0 {
 			return true
 		}
 		for {
-			if c.txChannelHasCapacity(required) {
+			if c.encodeQueueHasCapacity(required) {
 				return true
 			}
 
 			select {
 			case <-ctx.Done():
 				return false
-			case <-c.txSpaceSignal:
+			case <-c.encodeQueueSpaceSignal:
 			case <-idleTimer.C:
 			}
 
@@ -83,7 +74,6 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 		}
 	}
 
-dispatchLoop:
 	for {
 		currentVersion := c.streamSetVersion.Load()
 		if currentVersion != cachedVersion || cachedIDs == nil || cachedStreams == nil {
@@ -154,7 +144,6 @@ dispatchLoop:
 					TotalFragments: p.TotalFragments,
 					Payload:        nil,
 				}
-
 				selectedStreamID = p.StreamID
 				selectedID = -1
 				peekedOK = true
@@ -214,35 +203,11 @@ dispatchLoop:
 			continue
 		}
 
-		conns := c.selectTargetConnections(peekedItem.PacketType, selectedStreamID)
-		if len(conns) == 0 {
-			// No valid connections available for this packet. Don't block the
-			// dispatcher — doing so would stall ALL streams until a resolver
-			// comes back. Instead, pop and discard non-retriable control packets
-			// so the queue doesn't jam, and leave data/resend packets for ARQ
-			// retransmission.
-			if peekedItem.PacketType != Enums.PACKET_STREAM_DATA && peekedItem.PacketType != Enums.PACKET_STREAM_RESEND {
-				if selected != nil {
-					if dropped, _, ok := selected.PopNextTXPacket(); ok && dropped != nil {
-						selected.ReleaseTXPacket(dropped)
-					}
-				} else if selectedID == -1 {
-					c.orphanQueue.Pop(func(p VpnProto.Packet) uint64 {
-						return Enums.PacketTypeStreamKey(p.StreamID, p.PacketType)
-					})
-				}
-			}
-			if !waitForWork() {
-				return
-			}
-			continue dispatchLoop
-		}
-
-		if !waitForTxCapacity(1) {
+		if !waitForEncodeCapacity(1) {
 			if ctx.Err() != nil {
 				return
 			}
-			continue dispatchLoop
+			continue
 		}
 
 		var item *clientStreamTXPacket
@@ -250,14 +215,14 @@ dispatchLoop:
 		if selected != nil {
 			item, _, ok = selected.PopNextTXPacket()
 			if !ok || item == nil {
-				continue dispatchLoop
+				continue
 			}
 		} else {
 			p, _, ok := c.orphanQueue.Pop(func(p VpnProto.Packet) uint64 {
 				return Enums.PacketTypeStreamKey(p.StreamID, p.PacketType)
 			})
 			if !ok {
-				continue dispatchLoop
+				continue
 			}
 			item = &clientStreamTXPacket{
 				PacketType:     p.PacketType,
@@ -272,7 +237,7 @@ dispatchLoop:
 			(item.PacketType == Enums.PACKET_STREAM_DATA || item.PacketType == Enums.PACKET_STREAM_RESEND) &&
 			!c.shouldTransmitQueuedStreamPacket(selected, item) {
 			selected.ReleaseTXPacket(item)
-			continue dispatchLoop
+			continue
 		}
 
 		var finalPacketType uint8
@@ -368,7 +333,6 @@ dispatchLoop:
 				finalPacketType = Enums.PACKET_PACKED_CONTROL_BLOCKS
 				finalPayload = payload
 				wasPacked = true
-
 				if selected != nil {
 					selected.ReleaseTXPacket(item)
 				}
@@ -405,18 +369,16 @@ dispatchLoop:
 			opts.TotalFragments = item.TotalFragments
 		}
 
-		task := rawOutboundTask{
-			packetType: finalPacketType,
-			payload:    finalPayload,
-			opts:       opts,
-			wasPacked:  wasPacked,
-			item:       item,
-			selected:   selected,
-			conns:      conns,
+		task := encodeTask{
+			opts:      opts,
+			dupCount:  c.runtimePacketDuplicationCount(finalPacketType),
+			wasPacked: wasPacked,
+			item:      item,
+			selected:  selected,
 		}
 
 		select {
-		case c.txChannel <- task:
+		case c.encodeQueue <- task:
 		case <-ctx.Done():
 			if !wasPacked && selected != nil {
 				selected.ReleaseTXPacket(item)

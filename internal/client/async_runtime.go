@@ -19,6 +19,7 @@ import (
 	"masterdnsvpn-go/internal/arq"
 	"masterdnsvpn-go/internal/client/handlers"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
+	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 )
 
@@ -85,58 +86,92 @@ func (c *Client) resetRuntimeBindings(resetSession bool) {
 	}
 
 	c.closeResolverConnPools()
-	c.clearTxSignal()
-	c.clearTxSpaceSignal()
+	c.clearDispatchSignal()
+	c.clearEncodeQueueSpaceSignal()
+	c.clearWriterQueueSpaceSignal()
 	c.clearSessionResetPending()
 	if resetSession {
 		c.resetSessionState(true)
 	}
 }
 
-func (c *Client) clearTxSignal() {
-	if c == nil || c.txSignal == nil {
+func (c *Client) clearDispatchSignal() {
+	if c == nil || c.dispatchSignal == nil {
 		return
 	}
 	for {
 		select {
-		case <-c.txSignal:
+		case <-c.dispatchSignal:
 		default:
 			return
 		}
 	}
 }
 
-func (c *Client) clearTxSpaceSignal() {
-	if c == nil || c.txSpaceSignal == nil {
+func (c *Client) clearEncodeQueueSpaceSignal() {
+	if c == nil || c.encodeQueueSpaceSignal == nil {
 		return
 	}
 	for {
 		select {
-		case <-c.txSpaceSignal:
+		case <-c.encodeQueueSpaceSignal:
 		default:
 			return
 		}
 	}
 }
 
-func (c *Client) signalTxSpace() {
-	if c == nil || c.txSpaceSignal == nil {
+func (c *Client) clearWriterQueueSpaceSignal() {
+	if c == nil || c.writerQueueSpaceSignal == nil {
+		return
+	}
+	for {
+		select {
+		case <-c.writerQueueSpaceSignal:
+		default:
+			return
+		}
+	}
+}
+
+func (c *Client) signalEncodeQueueSpace() {
+	if c == nil || c.encodeQueueSpaceSignal == nil {
 		return
 	}
 	select {
-	case c.txSpaceSignal <- struct{}{}:
+	case c.encodeQueueSpaceSignal <- struct{}{}:
 	default:
 	}
 }
 
-func (c *Client) txChannelHasCapacity(needed int) bool {
-	if c == nil || c.txChannel == nil {
+func (c *Client) signalWriterQueueSpace() {
+	if c == nil || c.writerQueueSpaceSignal == nil {
+		return
+	}
+	select {
+	case c.writerQueueSpaceSignal <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) encodeQueueHasCapacity(needed int) bool {
+	if c == nil || c.encodeQueue == nil {
 		return false
 	}
 	if needed <= 0 {
 		needed = 1
 	}
-	return cap(c.txChannel)-len(c.txChannel) >= needed
+	return cap(c.encodeQueue)-len(c.encodeQueue) >= needed
+}
+
+func (c *Client) encodedTXChannelHasCapacity(needed int) bool {
+	if c == nil || c.encodedTXChannel == nil {
+		return false
+	}
+	if needed <= 0 {
+		needed = 1
+	}
+	return cap(c.encodedTXChannel)-len(c.encodedTXChannel) >= needed
 }
 
 func (c *Client) onRXDrop(addr *net.UDPAddr) {
@@ -417,7 +452,7 @@ func (c *Client) drainQueues() {
 	// Drain TX
 	for {
 		select {
-		case task := <-c.txChannel:
+		case task := <-c.encodeQueue:
 			if !task.wasPacked && task.selected != nil && task.item != nil {
 				task.selected.ReleaseTXPacket(task.item)
 			}
@@ -478,17 +513,10 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 		select {
 		case <-ctx.Done():
 			return
-		case task, ok := <-c.txChannel:
-			c.signalTxSpace()
+		case task, ok := <-c.encodeQueue:
+			c.signalEncodeQueueSpace()
 			if !ok {
 				return
-			}
-
-			if len(task.conns) == 0 {
-				if !task.wasPacked && task.selected != nil {
-					task.selected.ReleaseTXPacket(task.item)
-				}
-				continue
 			}
 
 			encoded, err := c.buildEncodedAutoWithCompressionTrace(task.opts)
@@ -511,7 +539,47 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 			}
 			frames = frames[:0]
 
-			for _, resolverConn := range task.conns {
+			conns, err := c.selectTargetConnectionsForPacket(task.opts.PacketType, task.opts.StreamID)
+			if err != nil {
+				conns = nil
+			}
+			if len(conns) == 0 {
+				if task.opts.PacketType != Enums.PACKET_STREAM_DATA && task.opts.PacketType != Enums.PACKET_STREAM_RESEND {
+					if !task.wasPacked && task.selected != nil {
+						task.selected.ReleaseTXPacket(task.item)
+					}
+				} else if task.selected != nil && task.item != nil && !task.wasPacked {
+					task.selected.PushTXPacket(
+						Enums.DefaultPacketPriority(task.item.PacketType),
+						task.item.PacketType,
+						task.item.SequenceNum,
+						task.item.FragmentID,
+						task.item.TotalFragments,
+						task.item.CompressionType,
+						task.item.TTL,
+						task.item.Payload,
+					)
+					task.selected.ReleaseTXPacket(task.item)
+				}
+				continue
+			}
+
+			requiredWriterSlots := len(conns)
+			if requiredWriterSlots < 1 {
+				requiredWriterSlots = 1
+			}
+			for !c.encodedTXChannelHasCapacity(requiredWriterSlots) {
+				select {
+				case <-ctx.Done():
+					if !task.wasPacked && task.selected != nil {
+						task.selected.ReleaseTXPacket(task.item)
+					}
+					return
+				case <-c.writerQueueSpaceSignal:
+				}
+			}
+
+			for _, resolverConn := range conns {
 				domain := resolverConn.Domain
 				if domain == "" {
 					domain = defaultDomain
@@ -529,7 +597,7 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 						continue
 					}
 					if preparedDomainByName == nil {
-						preparedDomainByName = make(map[string]preparedTunnelDomain, len(task.conns))
+						preparedDomainByName = make(map[string]preparedTunnelDomain, len(conns))
 					}
 					preparedDomainByName[domain] = prepared
 				}
@@ -547,7 +615,7 @@ func (c *Client) asyncEncodeWorker(ctx context.Context, id int) {
 					dnsPacket = firstDNSPacket
 				default:
 					if packetByDomain == nil {
-						packetByDomain = make(map[string][]byte, len(task.conns)-1)
+						packetByDomain = make(map[string][]byte, max(0, len(conns)-1))
 					}
 					var cached bool
 					dnsPacket, cached = packetByDomain[domain]
@@ -614,6 +682,7 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 			if !ok {
 				return
 			}
+			c.signalWriterQueueSpace()
 			now := time.Now()
 			if c.tunnelPacketTimeout > 0 {
 				if lastDeadline.IsZero() || now.Add(refreshWindow).After(lastDeadline) {
