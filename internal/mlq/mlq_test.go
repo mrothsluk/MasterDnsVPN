@@ -30,22 +30,22 @@ func TestMLQPushPopRespectsPriorityAndFIFO(t *testing.T) {
 		t.Fatal("push p0-a failed")
 	}
 
-	item, prio, ok := q.Pop(testKey)
+	item, prio, ok := q.Pop()
 	if !ok || prio != 0 || item.value != "p0-a" {
 		t.Fatalf("unexpected first pop: ok=%v prio=%d value=%v", ok, prio, item)
 	}
 
-	item, prio, ok = q.Pop(testKey)
+	item, prio, ok = q.Pop()
 	if !ok || prio != 1 || item.value != "p1-a" {
 		t.Fatalf("unexpected second pop: ok=%v prio=%d value=%v", ok, prio, item)
 	}
 
-	item, prio, ok = q.Pop(testKey)
+	item, prio, ok = q.Pop()
 	if !ok || prio != 1 || item.value != "p1-b" {
 		t.Fatalf("unexpected third pop: ok=%v prio=%d value=%v", ok, prio, item)
 	}
 
-	item, prio, ok = q.Pop(testKey)
+	item, prio, ok = q.Pop()
 	if !ok || prio != 3 || item.value != "p3-a" {
 		t.Fatalf("unexpected fourth pop: ok=%v prio=%d value=%v", ok, prio, item)
 	}
@@ -85,7 +85,7 @@ func TestMLQPopIfOnlyConsumesMatchingHead(t *testing.T) {
 		t.Fatalf("unexpected PopIf result: ok=%v value=%v", ok, item)
 	}
 
-	item2, _, ok := q.Pop(testKey)
+	item2, _, ok := q.Pop()
 	if !ok || item2.value != "next" {
 		t.Fatalf("unexpected remaining item after PopIf: ok=%v value=%v", ok, item2)
 	}
@@ -131,7 +131,7 @@ func TestMLQClearInvokesCallbackAndResetsState(t *testing.T) {
 		t.Fatalf("unexpected highest priority after clear: %d", got)
 	}
 
-	if _, _, ok := q.Pop(testKey); ok {
+	if _, _, ok := q.Pop(); ok {
 		t.Fatal("pop unexpectedly succeeded after clear")
 	}
 }
@@ -151,7 +151,7 @@ func TestMLQPeekReturnsHeadWithoutRemoving(t *testing.T) {
 		t.Fatalf("peek should not remove item, size=%d", q.Size())
 	}
 
-	item, prio, ok = q.Pop(testKey)
+	item, prio, ok = q.Pop()
 	if !ok || prio != 1 || item.value != "first" {
 		t.Fatalf("unexpected pop after peek: ok=%v prio=%d value=%v", ok, prio, item)
 	}
@@ -163,7 +163,7 @@ func TestMLQRemoveByKeyRemovesQueuedItem(t *testing.T) {
 	q.Push(4, 10, &testItem{key: 10, value: "data"})
 	q.Push(2, 20, &testItem{key: 20, value: "other"})
 
-	item, ok := q.RemoveByKey(10, testKey)
+	item, ok := q.RemoveByKey(10)
 	if !ok || item == nil || item.value != "data" {
 		t.Fatalf("unexpected RemoveByKey result: ok=%v item=%v", ok, item)
 	}
@@ -193,7 +193,7 @@ func TestMLQFastSizeTracksAllMutations(t *testing.T) {
 		t.Fatalf("expected FastSize=2 after pushes, got %d", got)
 	}
 
-	if _, ok := q.RemoveByKey(2, testKey); !ok {
+	if _, ok := q.RemoveByKey(2); !ok {
 		t.Fatal("expected RemoveByKey to succeed")
 	}
 	if got := q.FastSize(); got != 1 {

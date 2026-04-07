@@ -221,9 +221,7 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 				continue
 			}
 		} else {
-			p, _, ok := c.orphanQueue.Pop(func(p VpnProto.Packet) uint64 {
-				return Enums.PacketTypeStreamKey(p.StreamID, p.PacketType)
-			})
+			p, _, ok := c.orphanQueue.Pop()
 			if !ok {
 				continue
 			}

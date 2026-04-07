@@ -76,7 +76,7 @@ func (m *MultiLevelQueue[T]) Push(priority int, key uint64, item T) bool {
 	return true
 }
 
-func (m *MultiLevelQueue[T]) Pop(keyExtractor func(T) uint64) (T, int, bool) {
+func (m *MultiLevelQueue[T]) Pop() (T, int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.popLocked()
@@ -146,7 +146,7 @@ func (m *MultiLevelQueue[T]) Get(key uint64) (T, bool) {
 	return value.item, true
 }
 
-func (m *MultiLevelQueue[T]) RemoveByKey(key uint64, keyExtractor func(T) uint64) (T, bool) {
+func (m *MultiLevelQueue[T]) RemoveByKey(key uint64) (T, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

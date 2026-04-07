@@ -244,9 +244,7 @@ func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum
 	}
 
 	if packetType == Enums.PACKET_STREAM_RESEND {
-		if stale, removed := s.txQueue.RemoveByKey(dataKey, func(p *clientStreamTXPacket) uint64 {
-			return Enums.PacketIdentityKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
-		}); removed {
+		if stale, removed := s.txQueue.RemoveByKey(dataKey); removed {
 			s.ReleaseTXPacket(stale)
 		}
 	}
@@ -262,9 +260,7 @@ func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum
 // PopNextTXPacket retrieves the highest priority packet from the queues.
 func (s *Stream_client) PopNextTXPacket() (*clientStreamTXPacket, int, bool) {
 	// Delegate to MLQ
-	packet, priority, ok := s.txQueue.Pop(func(p *clientStreamTXPacket) uint64 {
-		return Enums.PacketIdentityKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
-	})
+	packet, priority, ok := s.txQueue.Pop()
 	if ok && packet != nil {
 		s.NoteTXPacketDequeued(packet)
 	}
@@ -303,9 +299,7 @@ func (s *Stream_client) RemoveQueuedData(sequenceNum uint16) bool {
 	removedAny := false
 	for _, packetType := range []uint8{Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND} {
 		key := Enums.PacketIdentityKey(s.StreamID, packetType, sequenceNum, 0)
-		p, ok := s.txQueue.RemoveByKey(key, func(p *clientStreamTXPacket) uint64 {
-			return Enums.PacketIdentityKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
-		})
+		p, ok := s.txQueue.RemoveByKey(key)
 		if ok {
 			if p.isControlCounted.CompareAndSwap(true, false) {
 				s.controlCount.Add(-1)
@@ -326,9 +320,7 @@ func (s *Stream_client) RemoveQueuedDataNack(sequenceNum uint16) bool {
 	defer s.txQueueMu.Unlock()
 
 	key := Enums.PacketIdentityKey(s.StreamID, Enums.PACKET_STREAM_DATA_NACK, sequenceNum, 0)
-	p, ok := s.txQueue.RemoveByKey(key, func(p *clientStreamTXPacket) uint64 {
-		return Enums.PacketIdentityKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
-	})
+	p, ok := s.txQueue.RemoveByKey(key)
 	if !ok {
 		return false
 	}

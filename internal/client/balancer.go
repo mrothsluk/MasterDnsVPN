@@ -112,6 +112,8 @@ type connectionStats struct {
 	windowStartedAt atomic.Int64 // UnixNano
 	windowSent      atomic.Uint32
 	windowLost      atomic.Uint32
+	windowMu        sync.Mutex
+	halfLifeRunning atomic.Bool
 }
 
 const connectionStatsHalfLifeThreshold = 1000
@@ -344,9 +346,7 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	stats.lost.Add(1)
 	stats.applyHalfLife()
 
-	stats.ensureWindow(now, window)
-	totalTimedOut := stats.windowLost.Add(1)
-	totalSent := stats.windowSent.Load()
+	totalTimedOut, totalSent := stats.recordWindowTimeout(now, window)
 
 	if minObservations < 1 {
 		minObservations = 1
@@ -404,17 +404,7 @@ func (b *Balancer) RetractTimeout(serverKey string, now time.Time, window time.D
 	}
 
 	stats.applyHalfLife()
-	stats.ensureWindow(now, window)
-	for {
-		currentLost := stats.windowLost.Load()
-		if currentLost == 0 {
-			break
-		}
-		if stats.windowLost.CompareAndSwap(currentLost, currentLost-1) {
-			break
-		}
-	}
-	return true
+	return stats.retractWindowTimeout(now, window)
 }
 
 func (b *Balancer) TrackResolverSend(
@@ -468,8 +458,7 @@ func (b *Balancer) TrackResolverSend(
 
 	b.ReportSend(serverKey)
 	if stats := b.statsForKey(serverKey); stats != nil {
-		stats.ensureWindow(sentAt, window)
-		stats.windowSent.Add(1)
+		stats.recordWindowSend(sentAt, window)
 	}
 }
 
@@ -1093,7 +1082,7 @@ func (b *Balancer) connectionByKeyLocked(serverKey string) (*Connection, bool) {
 	return &b.connections[idx], true
 }
 
-func (s *connectionStats) ensureWindow(now time.Time, window time.Duration) {
+func (s *connectionStats) ensureWindowLocked(now time.Time, window time.Duration) {
 	if s == nil {
 		return
 	}
@@ -1118,10 +1107,52 @@ func (s *connectionStats) ensureWindow(now time.Time, window time.Duration) {
 	}
 }
 
+func (s *connectionStats) recordWindowSend(now time.Time, window time.Duration) {
+	if s == nil {
+		return
+	}
+	s.windowMu.Lock()
+	s.ensureWindowLocked(now, window)
+	s.windowSent.Add(1)
+	s.windowMu.Unlock()
+}
+
+func (s *connectionStats) recordWindowTimeout(now time.Time, window time.Duration) (uint32, uint32) {
+	if s == nil {
+		return 0, 0
+	}
+	s.windowMu.Lock()
+	s.ensureWindowLocked(now, window)
+	totalTimedOut := s.windowLost.Add(1)
+	totalSent := s.windowSent.Load()
+	s.windowMu.Unlock()
+	return totalTimedOut, totalSent
+}
+
+func (s *connectionStats) retractWindowTimeout(now time.Time, window time.Duration) bool {
+	if s == nil {
+		return false
+	}
+	s.windowMu.Lock()
+	defer s.windowMu.Unlock()
+	s.ensureWindowLocked(now, window)
+	for {
+		currentLost := s.windowLost.Load()
+		if currentLost == 0 {
+			return false
+		}
+		if s.windowLost.CompareAndSwap(currentLost, currentLost-1) {
+			return true
+		}
+	}
+}
+
 func (s *connectionStats) resetWindow() {
 	if s == nil {
 		return
 	}
+	s.windowMu.Lock()
+	defer s.windowMu.Unlock()
 	s.windowStartedAt.Store(0)
 	s.windowSent.Store(0)
 	s.windowLost.Store(0)
@@ -1674,11 +1705,28 @@ func (s *connectionStats) applyHalfLife() {
 		return
 	}
 
-	s.sent.Store(sent / 2)
-	s.acked.Store(acked / 2)
-	s.lost.Store(lost / 2)
-	s.rttMicrosSum.Store(s.rttMicrosSum.Load() / 2)
-	s.rttCount.Store(rttCount / 2)
+	if !s.halfLifeRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.halfLifeRunning.Store(false)
+
+	halveUint64 := func(counter *atomic.Uint64) {
+		for {
+			current := counter.Load()
+			if current == 0 {
+				return
+			}
+			if counter.CompareAndSwap(current, current/2) {
+				return
+			}
+		}
+	}
+
+	halveUint64(&s.sent)
+	halveUint64(&s.acked)
+	halveUint64(&s.lost)
+	halveUint64(&s.rttMicrosSum)
+	halveUint64(&s.rttCount)
 }
 
 func (b *Balancer) nextRandom() uint64 {
