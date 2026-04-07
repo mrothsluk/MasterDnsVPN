@@ -467,9 +467,7 @@ func TestHandleInboundPacketTreatsServerFailureWithoutTXTAsResolverFailure(t *te
 		t.Fatalf("expected resolverPending to be cleared after SERVFAIL response, got=%d", len(c.resolverPending))
 	}
 
-	c.resolverHealthMu.Lock()
-	state := c.resolverHealth["a"]
-	c.resolverHealthMu.Unlock()
+	state := testGetResolverHealthState(c, "a")
 	if state == nil {
 		t.Fatal("expected resolver health state to exist")
 	}

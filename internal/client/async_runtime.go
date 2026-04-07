@@ -31,6 +31,33 @@ type asyncReadPacket struct {
 	localAddr string
 }
 
+func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
+	if c == nil {
+		return 1
+	}
+
+	count := c.cfg.PacketDuplicationCount
+	if count < 1 {
+		count = 1
+	}
+
+	if packetType == Enums.PACKET_STREAM_SYN ||
+		packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS ||
+		packetType == Enums.PACKET_SOCKS5_SYN ||
+		packetType == Enums.PACKET_STREAM_CLOSE_READ ||
+		packetType == Enums.PACKET_STREAM_CLOSE_WRITE {
+		if c.cfg.SetupPacketDuplicationCount > count {
+			count = c.cfg.SetupPacketDuplicationCount
+		}
+	}
+
+	if packetType == Enums.PACKET_PING {
+		return min(count, 2)
+	}
+
+	return count
+}
+
 // StopAsyncRuntime stops all running workers (Readers, Writers, Processors).
 // It ensures the UDP socket is closed and all goroutines exit.
 func (c *Client) StopAsyncRuntime() {
@@ -525,7 +552,11 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 				targetCount = 1
 			}
 
-			conns, err := c.selectTargetConnectionsForPacketCount(task.opts.PacketType, task.opts.StreamID, targetCount)
+			var (
+				conns []Connection
+				err   error
+			)
+			conns, err = c.runtime.SelectTargetsForPacketCount(c, task.opts.PacketType, task.opts.StreamID, targetCount)
 			if err != nil {
 				conns = nil
 			}

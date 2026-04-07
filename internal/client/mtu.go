@@ -122,7 +122,7 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 		wg.Wait()
 	}
 
-	c.balancer.RefreshValidConnections()
+	c.runtime.RefreshFromConnections(c.connections)
 	validConns, minUpload, minDownload, minUploadChars := summarizeValidMTUConnections(c.connections)
 	if len(validConns) == 0 {
 		if c.log != nil {

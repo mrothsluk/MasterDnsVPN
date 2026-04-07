@@ -37,6 +37,7 @@ type Client struct {
 	log      *logger.Logger
 	codec    *security.Codec
 	balancer *Balancer
+	runtime  *ResolverRuntime
 
 	connections         []Connection
 	connectionsByKey    map[string]int
@@ -48,11 +49,6 @@ type Client struct {
 	resolverAddrCache   map[string]*net.UDPAddr
 	resolverStatsMu     sync.RWMutex
 	resolverPending     map[resolverSampleKey]resolverSample
-	resolverHealthMu    sync.RWMutex
-	resolverHealth      map[string]*resolverHealthState
-	resolverRecheck     map[string]resolverRecheckState
-	runtimeDisabled     map[string]resolverDisabledState
-	resolverRecheckSem  chan struct{}
 	nowFn               func() time.Time
 	recheckConnectionFn func(conn *Connection) bool
 
@@ -253,10 +249,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		resolverConns:                         make(map[string]chan pooledUDPConn),
 		resolverAddrCache:                     make(map[string]*net.UDPAddr),
 		resolverPending:                       make(map[resolverSampleKey]resolverSample),
-		resolverHealth:                        make(map[string]*resolverHealthState),
-		resolverRecheck:                       make(map[string]resolverRecheckState),
-		runtimeDisabled:                       make(map[string]resolverDisabledState),
-		resolverRecheckSem:                    make(chan struct{}, max(1, cfg.RecheckBatchSize)),
 		mtuTestRetries:                        cfg.MTUTestRetries,
 		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
 		mtuSaveToFile:                         cfg.SaveMTUServersToFile,
@@ -304,6 +296,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		c.streamResolverFailoverCooldown = time.Second
 	}
 
+	c.runtime = NewResolverRuntime(c.balancer, cfg.RecheckBatchSize, c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.pingManager = newPingManager(c)
 	return c
 }
@@ -483,7 +476,7 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		}
 
 		if arqObj.HandleDataNack(packet.SequenceNum) {
-			c.noteStreamProgress(packet.StreamID)
+			c.runtime.noteStreamProgress(packet.StreamID)
 		}
 	case Enums.PACKET_STREAM_CONNECTED:
 		return c.handleStreamConnected(packet, s, arqObj)
@@ -503,7 +496,7 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 	default:
 		handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
 		if handledAck {
-			c.noteStreamProgress(packet.StreamID)
+			c.runtime.noteStreamProgress(packet.StreamID)
 		}
 		if _, ok := Enums.GetPacketCloseStream(packet.PacketType); handledAck && ok {
 			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {

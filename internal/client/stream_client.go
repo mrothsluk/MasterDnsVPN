@@ -57,17 +57,8 @@ type Stream_client struct {
 	InitialPayload []byte
 	PriorityCounts map[int]int
 
-	// Metadata & Failover
-	PreferredServerKey     string
-	ResolverResendStreak   int
-	LastResolverFailoverAt time.Time
 	HandshakeLastProgress  time.Time
-	CachedResolverPlan     []Connection
-	CachedResolverPlanFor  string
-	CachedResolverPlanSize int
-	CachedResolverVersion  uint64
 
-	resolverMu    sync.Mutex
 	txQueueMu     sync.Mutex
 	statusMu      sync.RWMutex
 	terminalSince time.Time
@@ -181,7 +172,7 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 	}
 
 	if streamID != 0 {
-		c.ensureStreamPreferredConnection(s)
+		c.runtime.ensureStreamPreferredConnection(c, streamID)
 	}
 
 	return s
@@ -349,6 +340,7 @@ func (s *Stream_client) finalizeAfterARQClose() {
 
 	s.cleanupOnce.Do(func() {
 		if s.client != nil {
+		s.client.runtime.cleanupStream(s.StreamID)
 			s.client.streamsMu.Lock()
 			if current, ok := s.client.active_streams[s.StreamID]; ok && current == s {
 				delete(s.client.active_streams, s.StreamID)

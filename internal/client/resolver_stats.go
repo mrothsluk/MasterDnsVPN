@@ -48,21 +48,17 @@ func (c *Client) resolverSampleTTL() time.Duration {
 }
 
 func (c *Client) noteResolverSend(serverKey string) {
-	if c == nil || serverKey == "" || c.balancer == nil {
+	if c == nil || serverKey == "" {
 		return
 	}
-	c.balancer.ReportSend(serverKey)
+	c.runtime.NoteSend(serverKey)
 }
 
 func (c *Client) noteResolverSuccess(serverKey string, rtt time.Duration) {
-	if c == nil || serverKey == "" || c.balancer == nil {
+	if c == nil || serverKey == "" {
 		return
 	}
-	if rtt < 0 {
-		rtt = 0
-	}
-	c.balancer.ReportSuccess(serverKey, rtt)
-	c.recordResolverHealthEvent(serverKey, true, c.now())
+	c.runtime.NoteSuccess(serverKey, rtt, c.now(), c.autoDisableTimeoutWindow())
 }
 
 func (c *Client) trackResolverSend(packet []byte, resolverAddr string, localAddr string, serverKey string, sentAt time.Time) {
@@ -150,7 +146,7 @@ func (c *Client) trackResolverFailure(packet []byte, addr *net.UDPAddr, localAdd
 		return
 	}
 
-	c.recordResolverHealthEvent(sample.serverKey, false, failedAt)
+	c.noteResolverFailure(sample.serverKey, failedAt)
 }
 
 func (c *Client) collectExpiredResolverTimeouts(now time.Time) {

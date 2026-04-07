@@ -4,7 +4,6 @@ import (
 	"context"
 	"math"
 	"slices"
-	"sort"
 	"time"
 
 	"masterdnsvpn-go/internal/logger"
@@ -64,7 +63,7 @@ func (c *Client) activeResolverCount() int {
 }
 
 func (c *Client) initResolverRecheckMeta() {
-	if c == nil {
+	if c == nil || c.runtime == nil {
 		return
 	}
 
@@ -75,26 +74,26 @@ func (c *Client) initResolverRecheckMeta() {
 	c.resolverPending = make(map[resolverSampleKey]resolverSample)
 	c.resolverStatsMu.Unlock()
 
-	c.resolverHealthMu.Lock()
-	defer c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Lock()
+	defer c.runtime.healthMu.Unlock()
 
-	c.resolverHealth = make(map[string]*resolverHealthState, len(c.connections))
-	c.resolverRecheck = make(map[string]resolverRecheckState, len(c.connections))
-	c.runtimeDisabled = make(map[string]resolverDisabledState)
+	c.runtime.health = make(map[string]*resolverHealthState, len(c.connections))
+	c.runtime.recheck = make(map[string]resolverRecheckState, len(c.connections))
+	c.runtime.runtimeDisabled = make(map[string]resolverDisabledState)
 
 	for idx := range c.connections {
 		conn := &c.connections[idx]
 		if conn.Key == "" {
 			continue
 		}
-		c.resolverHealth[conn.Key] = &resolverHealthState{
+		c.runtime.health[conn.Key] = &resolverHealthState{
 			Events: make([]resolverHealthEvent, 0, 8),
 		}
 		meta := resolverRecheckState{}
 		if !conn.IsValid {
 			meta.NextAt = nextInactive
 		}
-		c.resolverRecheck[conn.Key] = meta
+		c.runtime.recheck[conn.Key] = meta
 	}
 }
 
@@ -140,10 +139,10 @@ func (c *Client) nextResolverHealthWait(now time.Time) time.Duration {
 		return clampResolverHealthWait(waitFor)
 	}
 
-	c.resolverHealthMu.RLock()
-	defer c.resolverHealthMu.RUnlock()
+	c.runtime.healthMu.RLock()
+	defer c.runtime.healthMu.RUnlock()
 
-	for key, meta := range c.resolverRecheck {
+	for key, meta := range c.runtime.recheck {
 		conn, ok := c.GetConnectionByKey(key)
 		if !ok || conn.IsValid || meta.NextAt.IsZero() || meta.InFlight {
 			continue
@@ -174,108 +173,31 @@ func (c *Client) noteResolverTimeout(serverKey string, at time.Time) {
 	if at.IsZero() {
 		at = c.now()
 	}
-	c.recordResolverHealthEvent(serverKey, false, at)
+	c.runtime.NoteTimeout(serverKey, at, c.autoDisableTimeoutWindow())
 }
+
+func (c *Client) noteResolverFailure(serverKey string, at time.Time) {
+	if c == nil || serverKey == "" {
+		return
+	}
+	if at.IsZero() {
+		at = c.now()
+	}
+	c.runtime.NoteFailure(serverKey, at, c.autoDisableTimeoutWindow())
+}
+
 func (c *Client) recordResolverHealthEvent(serverKey string, success bool, now time.Time) {
 	if c == nil || serverKey == "" {
 		return
 	}
-	conn, ok := c.GetConnectionByKey(serverKey)
-	if !ok || !conn.IsValid {
-		return
-	}
-
-	c.resolverHealthMu.Lock()
-	defer c.resolverHealthMu.Unlock()
-
-	state := c.resolverHealth[serverKey]
-	if state == nil {
-		state = &resolverHealthState{Events: make([]resolverHealthEvent, 0, 8)}
-		c.resolverHealth[serverKey] = state
-	}
-	if success {
-		state.Events = state.Events[:0]
-		state.TimeoutOnlySince = time.Time{}
-		state.LastSuccessAt = now
-		return
-	}
-
-	c.insertResolverHealthEventLocked(state, resolverHealthEvent{At: now})
-	if state.TimeoutOnlySince.IsZero() || now.Before(state.TimeoutOnlySince) {
-		state.TimeoutOnlySince = now
-	}
-	c.pruneResolverHealthLocked(state, now)
-	if len(state.Events) == 0 {
-		state.TimeoutOnlySince = time.Time{}
-	} else if state.TimeoutOnlySince.IsZero() {
-		state.TimeoutOnlySince = state.Events[0].At
-	}
-}
-
-func (c *Client) insertResolverHealthEventLocked(state *resolverHealthState, event resolverHealthEvent) {
-	if state == nil {
-		return
-	}
-	n := len(state.Events)
-	if n == 0 || !event.At.Before(state.Events[n-1].At) {
-		state.Events = append(state.Events, event)
-		return
-	}
-
-	insertAt := sort.Search(n, func(i int) bool {
-		return !state.Events[i].At.Before(event.At)
-	})
-	state.Events = append(state.Events, resolverHealthEvent{})
-	copy(state.Events[insertAt+1:], state.Events[insertAt:])
-	state.Events[insertAt] = event
+	c.runtime.RecordHealthEvent(serverKey, success, now, c.autoDisableTimeoutWindow())
 }
 
 func (c *Client) retractResolverTimeoutEvent(serverKey string, timedOutAt time.Time, now time.Time) {
 	if c == nil || serverKey == "" || timedOutAt.IsZero() {
 		return
 	}
-
-	c.resolverHealthMu.Lock()
-	defer c.resolverHealthMu.Unlock()
-
-	state := c.resolverHealth[serverKey]
-	if state == nil || len(state.Events) == 0 {
-		return
-	}
-
-	removeIdx := -1
-	for i, event := range state.Events {
-		if event.At.Equal(timedOutAt) {
-			removeIdx = i
-			break
-		}
-	}
-	if removeIdx == -1 {
-		return
-	}
-
-	state.Events = append(state.Events[:removeIdx], state.Events[removeIdx+1:]...)
-	c.pruneResolverHealthLocked(state, now)
-	if len(state.Events) == 0 {
-		state.TimeoutOnlySince = time.Time{}
-	} else {
-		state.TimeoutOnlySince = state.Events[0].At
-	}
-}
-
-func (c *Client) pruneResolverHealthLocked(state *resolverHealthState, now time.Time) {
-	if state == nil || len(state.Events) == 0 {
-		return
-	}
-	cutoff := now.Add(-c.autoDisableTimeoutWindow())
-	dropCount := 0
-	for dropCount < len(state.Events) && state.Events[dropCount].At.Before(cutoff) {
-		dropCount++
-	}
-	if dropCount == 0 {
-		return
-	}
-	state.Events = append(state.Events[:0], state.Events[dropCount:]...)
+	c.runtime.RetractTimeoutEvent(serverKey, timedOutAt, now, c.autoDisableTimeoutWindow())
 }
 
 func (c *Client) runResolverAutoDisable(now time.Time) {
@@ -287,12 +209,12 @@ func (c *Client) runResolverAutoDisable(now time.Time) {
 	debugEnabled := c.resolverHealthDebugEnabled()
 	candidates := make([]resolverAutoDisableCandidate, 0, len(c.connections))
 	snap := c.resolverHealthBalancerSnapshot()
-	c.resolverHealthMu.Lock()
-	for key, state := range c.resolverHealth {
+	c.runtime.healthMu.Lock()
+	for key, state := range c.runtime.health {
 		if state == nil {
 			continue
 		}
-		c.pruneResolverHealthLocked(state, now)
+		c.runtime.pruneHealthLocked(state, now, window)
 		if !c.resolverConnectionIsValidFromSnapshot(snap, key) {
 			continue
 		}
@@ -315,7 +237,7 @@ func (c *Client) runResolverAutoDisable(now time.Time) {
 		}
 		candidates = append(candidates, candidate)
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	if debugEnabled {
 		for _, candidate := range candidates {
@@ -369,42 +291,46 @@ func (c *Client) disableResolverConnection(serverKey string, cause string) bool 
 	now := c.now()
 	nextAt := now.Add(maxDuration(5*time.Second, c.recheckServerInterval()*2))
 
-	c.resolverHealthMu.Lock()
-	meta := c.resolverRecheck[serverKey]
-	c.runtimeDisabled[serverKey] = resolverDisabledState{
+	c.runtime.healthMu.Lock()
+	meta := c.runtime.recheck[serverKey]
+	c.runtime.runtimeDisabled[serverKey] = resolverDisabledState{
 		DisabledAt:   now,
 		NextRetryAt:  nextAt,
 		RetryCount:   meta.FailCount,
 		SuccessCount: 0,
 		Cause:        cause,
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
-	if !c.balancer.SetConnectionValidity(serverKey, false) {
-		c.resolverHealthMu.Lock()
-		delete(c.runtimeDisabled, serverKey)
-		c.resolverHealthMu.Unlock()
+	setValid := c.balancer.SetConnectionValidity
+	if c.runtime != nil {
+		setValid = c.runtime.SetConnectionValidity
+	}
+	if !setValid(serverKey, false) {
+		c.runtime.healthMu.Lock()
+		delete(c.runtime.runtimeDisabled, serverKey)
+		c.runtime.healthMu.Unlock()
 		return false
 	}
 	if refreshed, ok := c.GetConnectionByKey(serverKey); ok {
 		conn = refreshed
 	}
 
-	c.resolverHealthMu.Lock()
-	meta = c.resolverRecheck[serverKey]
+	c.runtime.healthMu.Lock()
+	meta = c.runtime.recheck[serverKey]
 	meta.NextAt = nextAt
-	c.resolverRecheck[serverKey] = meta
-	c.runtimeDisabled[serverKey] = resolverDisabledState{
+	c.runtime.recheck[serverKey] = meta
+	c.runtime.runtimeDisabled[serverKey] = resolverDisabledState{
 		DisabledAt:   now,
 		NextRetryAt:  nextAt,
 		RetryCount:   meta.FailCount,
 		SuccessCount: 0,
 		Cause:        cause,
 	}
-	delete(c.resolverHealth, serverKey)
-	c.resolverHealthMu.Unlock()
+	delete(c.runtime.health, serverKey)
+	c.runtime.healthMu.Unlock()
 
-	c.clearPreferredResolverReferences(serverKey)
+	c.runtime.clearPreferredResolverReferences(serverKey)
 	c.balancer.ResetServerStats(serverKey)
 	if c.log != nil {
 		c.log.Warnf(
@@ -418,34 +344,6 @@ func (c *Client) disableResolverConnection(serverKey string, cause string) bool 
 	return true
 }
 
-func (c *Client) clearPreferredResolverReferences(serverKey string) {
-	if c == nil || serverKey == "" {
-		return
-	}
-
-	c.streamsMu.RLock()
-	streams := make([]*Stream_client, 0, len(c.active_streams))
-	for _, stream := range c.active_streams {
-		if stream != nil {
-			streams = append(streams, stream)
-		}
-	}
-	c.streamsMu.RUnlock()
-
-	for _, stream := range streams {
-		stream.resolverMu.Lock()
-		if stream.PreferredServerKey == serverKey {
-			stream.PreferredServerKey = ""
-			stream.ResolverResendStreak = 0
-			stream.CachedResolverPlan = nil
-			stream.CachedResolverPlanFor = ""
-			stream.CachedResolverPlanSize = 0
-			stream.CachedResolverVersion = 0
-		}
-		stream.resolverMu.Unlock()
-	}
-}
-
 func (c *Client) reactivateResolverConnection(serverKey string) bool {
 	if c == nil || serverKey == "" {
 		return false
@@ -454,26 +352,30 @@ func (c *Client) reactivateResolverConnection(serverKey string) bool {
 	if !ok || conn.IsValid {
 		return false
 	}
-	if !c.balancer.SetConnectionValidity(serverKey, true) {
+	setValid := c.balancer.SetConnectionValidity
+	if c.runtime != nil {
+		setValid = c.runtime.SetConnectionValidity
+	}
+	if !setValid(serverKey, true) {
 		return false
 	}
 	if refreshed, ok := c.GetConnectionByKey(serverKey); ok {
 		conn = refreshed
 	}
 
-	c.resolverHealthMu.Lock()
-	delete(c.runtimeDisabled, serverKey)
-	delete(c.resolverHealth, serverKey)
-	c.resolverRecheck[serverKey] = resolverRecheckState{}
+	c.runtime.healthMu.Lock()
+	delete(c.runtime.runtimeDisabled, serverKey)
+	delete(c.runtime.health, serverKey)
+	c.runtime.recheck[serverKey] = resolverRecheckState{}
 	// Periodically prune runtimeDisabled entries for connections no longer tracked
-	if len(c.runtimeDisabled) > len(c.connections) {
-		for k := range c.runtimeDisabled {
+	if len(c.runtime.runtimeDisabled) > len(c.connections) {
+		for k := range c.runtime.runtimeDisabled {
 			if c.connectionPtrByKey(k) == nil {
-				delete(c.runtimeDisabled, k)
+				delete(c.runtime.runtimeDisabled, k)
 			}
 		}
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	// Seed with a moderate initial score so the balancer doesn't flood the
 	// just-reactivated resolver before it has proven itself. Stats were zeroed
@@ -496,13 +398,13 @@ func (c *Client) clearResolverRecheckInFlight(serverKey string) {
 		return
 	}
 
-	c.resolverHealthMu.Lock()
-	meta, ok := c.resolverRecheck[serverKey]
+	c.runtime.healthMu.Lock()
+	meta, ok := c.runtime.recheck[serverKey]
 	if ok && meta.InFlight {
 		meta.InFlight = false
-		c.resolverRecheck[serverKey] = meta
+		c.runtime.recheck[serverKey] = meta
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 }
 
 func (c *Client) scheduleResolverRecheckFailure(serverKey string, runtimePriority bool, now time.Time) {
@@ -510,10 +412,10 @@ func (c *Client) scheduleResolverRecheckFailure(serverKey string, runtimePriorit
 		return
 	}
 
-	c.resolverHealthMu.Lock()
-	defer c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Lock()
+	defer c.runtime.healthMu.Unlock()
 
-	meta := c.resolverRecheck[serverKey]
+	meta := c.runtime.recheck[serverKey]
 	meta.FailCount++
 
 	var base time.Duration
@@ -531,13 +433,13 @@ func (c *Client) scheduleResolverRecheckFailure(serverKey string, runtimePriorit
 	delay += deterministicResolverJitter(serverKey, delay)
 	meta.NextAt = now.Add(delay)
 	meta.InFlight = false
-	c.resolverRecheck[serverKey] = meta
+	c.runtime.recheck[serverKey] = meta
 
-	if state, ok := c.runtimeDisabled[serverKey]; ok {
+	if state, ok := c.runtime.runtimeDisabled[serverKey]; ok {
 		state.NextRetryAt = meta.NextAt
 		state.RetryCount = meta.FailCount
 		state.SuccessCount = 0
-		c.runtimeDisabled[serverKey] = state
+		c.runtime.runtimeDisabled[serverKey] = state
 	}
 }
 
@@ -580,16 +482,16 @@ func (c *Client) runResolverRecheckBatch(ctx context.Context, now time.Time) {
 		if !c.tryAcquireResolverRecheckSlot() {
 			break
 		}
-		c.resolverHealthMu.Lock()
-		if m, ok := c.resolverRecheck[candidate.key]; ok {
+		c.runtime.healthMu.Lock()
+		if m, ok := c.runtime.recheck[candidate.key]; ok {
 			m.InFlight = true
-			c.resolverRecheck[candidate.key] = m
+			c.runtime.recheck[candidate.key] = m
 		} else {
-			c.resolverHealthMu.Unlock()
+			c.runtime.healthMu.Unlock()
 			c.releaseResolverRecheckSlot()
 			continue
 		}
-		c.resolverHealthMu.Unlock()
+		c.runtime.healthMu.Unlock()
 
 		go func(cand resolverRecheckCandidate, cn Connection) {
 			defer func() {
@@ -614,24 +516,24 @@ func (c *Client) handleSuccessfulResolverRecheck(serverKey string, now time.Time
 		return
 	}
 
-	c.resolverHealthMu.Lock()
-	state, runtimeDisabled := c.runtimeDisabled[serverKey]
+	c.runtime.healthMu.Lock()
+	state, runtimeDisabled := c.runtime.runtimeDisabled[serverKey]
 	if runtimeDisabled {
 		state.SuccessCount++
 		if state.SuccessCount < runtimeDisabledResolverReactivationSuccessThreshold {
 			nextAt := now.Add(maxDuration(2*time.Second, c.recheckServerInterval()))
-			meta := c.resolverRecheck[serverKey]
+			meta := c.runtime.recheck[serverKey]
 			meta.InFlight = false
 			meta.NextAt = nextAt
-			c.resolverRecheck[serverKey] = meta
+			c.runtime.recheck[serverKey] = meta
 			state.NextRetryAt = nextAt
 			state.RetryCount = meta.FailCount
-			c.runtimeDisabled[serverKey] = state
-			c.resolverHealthMu.Unlock()
+			c.runtime.runtimeDisabled[serverKey] = state
+			c.runtime.healthMu.Unlock()
 			return
 		}
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	if !c.applyRecheckedResolverMTU(serverKey) {
 		c.clearResolverRecheckInFlight(serverKey)
@@ -644,11 +546,11 @@ func (c *Client) handleSuccessfulResolverRecheck(serverKey string, now time.Time
 }
 
 func (c *Client) tryAcquireResolverRecheckSlot() bool {
-	if c == nil || c.resolverRecheckSem == nil {
+	if c == nil || c.runtime == nil || c.runtime.recheckSem == nil {
 		return true
 	}
 	select {
-	case c.resolverRecheckSem <- struct{}{}:
+	case c.runtime.recheckSem <- struct{}{}:
 		return true
 	default:
 		return false
@@ -656,11 +558,11 @@ func (c *Client) tryAcquireResolverRecheckSlot() bool {
 }
 
 func (c *Client) releaseResolverRecheckSlot() {
-	if c == nil || c.resolverRecheckSem == nil {
+	if c == nil || c.runtime == nil || c.runtime.recheckSem == nil {
 		return
 	}
 	select {
-	case <-c.resolverRecheckSem:
+	case <-c.runtime.recheckSem:
 	default:
 	}
 }
@@ -670,12 +572,12 @@ func (c *Client) collectDueResolverRechecks(now time.Time) []resolverRecheckCand
 		return nil
 	}
 
-	c.resolverHealthMu.RLock()
-	defer c.resolverHealthMu.RUnlock()
+	c.runtime.healthMu.RLock()
+	defer c.runtime.healthMu.RUnlock()
 
-	runtimeCandidates := make([]resolverRecheckCandidate, 0, len(c.runtimeDisabled))
+	runtimeCandidates := make([]resolverRecheckCandidate, 0, len(c.runtime.runtimeDisabled))
 	normalCandidates := make([]resolverRecheckCandidate, 0, len(c.connections))
-	for key, meta := range c.resolverRecheck {
+	for key, meta := range c.runtime.recheck {
 		conn, ok := c.GetConnectionByKey(key)
 		if !ok || conn.IsValid || meta.InFlight {
 			continue
@@ -689,7 +591,7 @@ func (c *Client) collectDueResolverRechecks(now time.Time) []resolverRecheckCand
 			nextAt:    meta.NextAt,
 			failCount: meta.FailCount,
 		}
-		if state, ok := c.runtimeDisabled[key]; ok {
+		if state, ok := c.runtime.runtimeDisabled[key]; ok {
 			candidateValue.runtimePriority = true
 			candidateValue.nextAt = state.NextRetryAt
 			candidateValue.failCount = state.RetryCount
@@ -808,6 +710,15 @@ func (c *Client) applyRecheckedResolverMTU(serverKey string) bool {
 		return true
 	}
 
+	if c.runtime != nil {
+		return c.runtime.SetConnectionMTU(
+			serverKey,
+			c.syncedUploadMTU,
+			c.encodedCharsForPayload(c.syncedUploadMTU),
+			c.syncedDownloadMTU,
+		)
+	}
+
 	return c.balancer.SetConnectionMTU(
 		serverKey,
 		c.syncedUploadMTU,
@@ -817,12 +728,12 @@ func (c *Client) applyRecheckedResolverMTU(serverKey string) bool {
 }
 
 func (c *Client) isRuntimeDisabledResolver(serverKey string) bool {
-	if c == nil || serverKey == "" {
+	if c == nil || c.runtime == nil || serverKey == "" {
 		return false
 	}
-	c.resolverHealthMu.RLock()
-	_, ok := c.runtimeDisabled[serverKey]
-	c.resolverHealthMu.RUnlock()
+	c.runtime.healthMu.RLock()
+	_, ok := c.runtime.runtimeDisabled[serverKey]
+	c.runtime.healthMu.RUnlock()
 	return ok
 }
 

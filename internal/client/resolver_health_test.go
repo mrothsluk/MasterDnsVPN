@@ -91,18 +91,18 @@ func TestResolverHealthRecheckReactivatesConnection(t *testing.T) {
 	now := time.Date(2026, 3, 25, 12, 30, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{
 		FailCount: 2,
 		NextAt:    now.Add(-time.Second),
 	}
-	c.runtimeDisabled["a"] = resolverDisabledState{
+	c.runtime.runtimeDisabled["a"] = resolverDisabledState{
 		DisabledAt:  now.Add(-time.Minute),
 		NextRetryAt: now.Add(-time.Second),
 		RetryCount:  2,
 		Cause:       "timeout window",
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	c.runResolverRecheckBatch(context.Background(), now)
 
@@ -111,10 +111,10 @@ func TestResolverHealthRecheckReactivatesConnection(t *testing.T) {
 		if !ok || conn.IsValid {
 			return false
 		}
-		c.resolverHealthMu.Lock()
-		defer c.resolverHealthMu.Unlock()
-		state, disabled := c.runtimeDisabled["a"]
-		meta := c.resolverRecheck["a"]
+		c.runtime.healthMu.Lock()
+		defer c.runtime.healthMu.Unlock()
+		state, disabled := c.runtime.runtimeDisabled["a"]
+		meta := c.runtime.recheck["a"]
 		return disabled && state.SuccessCount == 1 && !meta.InFlight && meta.NextAt.After(now)
 	}, "expected first successful recheck to keep runtime-disabled resolver invalid")
 
@@ -168,18 +168,18 @@ func TestResolverHealthRecheckUsesSnapshotUpdateInsteadOfMutatingSharedConnectio
 	now := time.Date(2026, 3, 31, 8, 0, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{
 		FailCount: 1,
 		NextAt:    now.Add(-time.Second),
 	}
-	c.runtimeDisabled["a"] = resolverDisabledState{
+	c.runtime.runtimeDisabled["a"] = resolverDisabledState{
 		DisabledAt:  now.Add(-time.Minute),
 		NextRetryAt: now.Add(-time.Second),
 		RetryCount:  1,
 		Cause:       "timeout window",
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	c.recheckConnectionFn = func(conn *Connection) bool {
 		if conn == nil {
@@ -204,10 +204,10 @@ func TestResolverHealthRecheckUsesSnapshotUpdateInsteadOfMutatingSharedConnectio
 		if !ok || conn.IsValid {
 			return false
 		}
-		c.resolverHealthMu.Lock()
-		defer c.resolverHealthMu.Unlock()
-		state, disabled := c.runtimeDisabled["a"]
-		meta := c.resolverRecheck["a"]
+		c.runtime.healthMu.Lock()
+		defer c.runtime.healthMu.Unlock()
+		state, disabled := c.runtime.runtimeDisabled["a"]
+		meta := c.runtime.recheck["a"]
 		return disabled && state.SuccessCount == 1 && !meta.InFlight && meta.NextAt.After(now)
 	}, "expected first successful recheck to keep runtime-disabled resolver invalid")
 
@@ -252,25 +252,25 @@ func TestResolverHealthRecheckFailureSchedulesNextRetry(t *testing.T) {
 	now := time.Date(2026, 3, 30, 9, 0, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{
 		FailCount: 1,
 		NextAt:    now.Add(-time.Second),
 	}
-	c.runtimeDisabled["a"] = resolverDisabledState{
+	c.runtime.runtimeDisabled["a"] = resolverDisabledState{
 		DisabledAt:  now.Add(-time.Minute),
 		NextRetryAt: now.Add(-time.Second),
 		RetryCount:  1,
 		Cause:       "timeout window",
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	c.runResolverRecheckBatch(context.Background(), now)
 
 	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
-		c.resolverHealthMu.Lock()
-		defer c.resolverHealthMu.Unlock()
-		meta := c.resolverRecheck["a"]
+		c.runtime.healthMu.Lock()
+		defer c.runtime.healthMu.Unlock()
+		meta := c.runtime.recheck["a"]
 		return meta.FailCount >= 2 && meta.NextAt.After(now)
 	}, "expected failed recheck to schedule a future retry")
 
@@ -302,9 +302,9 @@ func TestResolverHealthRecheckBatchReturnsWhileSlowProbeRunsInBackground(t *test
 	now := time.Date(2026, 3, 30, 9, 15, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtime.healthMu.Unlock()
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -365,10 +365,10 @@ func TestResolverHealthRecheckBatchStartsSecondDueResolverWithoutWaitingForFirst
 	now := time.Date(2026, 3, 30, 9, 20, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
-	c.resolverRecheck["b"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtime.recheck["b"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtime.healthMu.Unlock()
 
 	firstStarted := make(chan struct{}, 1)
 	releaseFirst := make(chan struct{})
@@ -454,15 +454,15 @@ func TestResolverHealthRecheckBatchDoesNotLaunchSameResolverTwiceWhileInFlight(t
 	now := time.Date(2026, 3, 30, 9, 25, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
-	c.runtimeDisabled["a"] = resolverDisabledState{
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtime.runtimeDisabled["a"] = resolverDisabledState{
 		DisabledAt:  now.Add(-time.Minute),
 		NextRetryAt: now.Add(-time.Second),
 		RetryCount:  1,
 		Cause:       "timeout window",
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -500,9 +500,9 @@ func TestResolverHealthRecheckBatchDoesNotLaunchSameResolverTwiceWhileInFlight(t
 	close(release)
 
 	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
-		c.resolverHealthMu.Lock()
-		defer c.resolverHealthMu.Unlock()
-		meta := c.resolverRecheck["a"]
+		c.runtime.healthMu.Lock()
+		defer c.runtime.healthMu.Unlock()
+		meta := c.runtime.recheck["a"]
 		return !meta.InFlight && meta.FailCount >= 1 && meta.NextAt.After(now)
 	}, "expected failed in-flight recheck to clear in-flight state and schedule retry")
 }
@@ -528,22 +528,22 @@ func TestResolverHealthRecheckBatchHonorsGlobalInFlightLimitAcrossBatches(t *tes
 	now := time.Date(2026, 3, 30, 9, 26, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
-	c.resolverRecheck["b"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
-	c.runtimeDisabled["a"] = resolverDisabledState{
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtime.recheck["b"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtime.runtimeDisabled["a"] = resolverDisabledState{
 		DisabledAt:  now.Add(-time.Minute),
 		NextRetryAt: now.Add(-time.Second),
 		RetryCount:  1,
 		Cause:       "timeout window",
 	}
-	c.runtimeDisabled["b"] = resolverDisabledState{
+	c.runtime.runtimeDisabled["b"] = resolverDisabledState{
 		DisabledAt:  now.Add(-time.Minute),
 		NextRetryAt: now.Add(-time.Second),
 		RetryCount:  1,
 		Cause:       "timeout window",
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	startedA := make(chan struct{}, 1)
 	releaseA := make(chan struct{})
@@ -591,9 +591,9 @@ func TestResolverHealthRecheckBatchHonorsGlobalInFlightLimitAcrossBatches(t *tes
 	close(releaseA)
 
 	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
-		c.resolverHealthMu.Lock()
-		defer c.resolverHealthMu.Unlock()
-		return !c.resolverRecheck["a"].InFlight
+		c.runtime.healthMu.Lock()
+		defer c.runtime.healthMu.Unlock()
+		return !c.runtime.recheck["a"].InFlight
 	}, "expected first recheck to finish and clear in-flight state")
 }
 
@@ -616,18 +616,18 @@ func TestResolverHealthSuccessfulRecheckClearsInFlightWhenResolverBecomesValidEl
 	now := time.Date(2026, 3, 30, 9, 27, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{
 		FailCount: 1,
 		NextAt:    now.Add(-time.Second),
 	}
-	c.runtimeDisabled["a"] = resolverDisabledState{
+	c.runtime.runtimeDisabled["a"] = resolverDisabledState{
 		DisabledAt:  now.Add(-time.Minute),
 		NextRetryAt: now.Add(-time.Second),
 		RetryCount:  1,
 		Cause:       "timeout window",
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -655,9 +655,9 @@ func TestResolverHealthSuccessfulRecheckClearsInFlightWhenResolverBecomesValidEl
 	close(release)
 
 	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
-		c.resolverHealthMu.Lock()
-		defer c.resolverHealthMu.Unlock()
-		meta := c.resolverRecheck["a"]
+		c.runtime.healthMu.Lock()
+		defer c.runtime.healthMu.Unlock()
+		meta := c.runtime.recheck["a"]
 		return !meta.InFlight
 	}, "expected successful recheck fallback path to clear in-flight marker")
 }
@@ -687,14 +687,14 @@ func TestResolverHealthRecheckBatchHonorsLimit(t *testing.T) {
 	now := time.Date(2026, 3, 30, 9, 5, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
+	c.runtime.healthMu.Lock()
 	for _, key := range []string{"a", "b", "c"} {
-		c.resolverRecheck[key] = resolverRecheckState{
+		c.runtime.recheck[key] = resolverRecheckState{
 			FailCount: 0,
 			NextAt:    now.Add(-time.Second),
 		}
 	}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Unlock()
 
 	c.runResolverRecheckBatch(context.Background(), now)
 
@@ -752,10 +752,10 @@ func TestResolverHealthRecheckBatchSkipsNotYetDueResolvers(t *testing.T) {
 	now := time.Date(2026, 3, 30, 9, 10, 0, 0, time.UTC)
 	c.nowFn = func() time.Time { return now }
 
-	c.resolverHealthMu.Lock()
-	c.resolverRecheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
-	c.resolverRecheck["b"] = resolverRecheckState{NextAt: now.Add(time.Minute)}
-	c.resolverHealthMu.Unlock()
+	c.runtime.healthMu.Lock()
+	c.runtime.recheck["a"] = resolverRecheckState{NextAt: now.Add(-time.Second)}
+	c.runtime.recheck["b"] = resolverRecheckState{NextAt: now.Add(time.Minute)}
+	c.runtime.healthMu.Unlock()
 
 	c.runResolverRecheckBatch(context.Background(), now)
 
@@ -781,27 +781,27 @@ func TestDisableResolverClearsPreferredStreamResolverReferences(t *testing.T) {
 	c.initResolverRecheckMeta()
 
 	streamA := testStream(21)
-	streamA.PreferredServerKey = "a"
-	streamA.ResolverResendStreak = 3
 	c.active_streams[streamA.StreamID] = streamA
+	testSetRoutePreferred(c, streamA.StreamID, "a")
+	testSetRouteResendStreak(c, streamA.StreamID, 3)
 
 	streamB := testStream(22)
-	streamB.PreferredServerKey = "b"
-	streamB.ResolverResendStreak = 2
 	c.active_streams[streamB.StreamID] = streamB
+	testSetRoutePreferred(c, streamB.StreamID, "b")
+	testSetRouteResendStreak(c, streamB.StreamID, 2)
 
 	if !c.disableResolverConnection("a", "test disable") {
 		t.Fatal("expected resolver a to be disabled")
 	}
 
-	if streamA.PreferredServerKey != "" {
-		t.Fatalf("expected preferred resolver for streamA to be cleared, got=%q", streamA.PreferredServerKey)
+	if state := testGetRouteState(c, streamA.StreamID); state.PreferredResolverKey != "" {
+		t.Fatalf("expected preferred resolver for streamA to be cleared, got=%q", state.PreferredResolverKey)
 	}
-	if streamA.ResolverResendStreak != 0 {
-		t.Fatalf("expected resend streak for streamA to be reset, got=%d", streamA.ResolverResendStreak)
+	if state := testGetRouteState(c, streamA.StreamID); state.ResolverResendStreak != 0 {
+		t.Fatalf("expected resend streak for streamA to be reset, got=%d", state.ResolverResendStreak)
 	}
-	if streamB.PreferredServerKey != "b" {
-		t.Fatalf("expected unrelated stream preferred resolver to stay intact, got=%q", streamB.PreferredServerKey)
+	if state := testGetRouteState(c, streamB.StreamID); state.PreferredResolverKey != "b" {
+		t.Fatalf("expected unrelated stream preferred resolver to stay intact, got=%q", state.PreferredResolverKey)
 	}
 }
 
@@ -821,8 +821,8 @@ func TestResetRuntimeBindingsPreservesResolverHealthState(t *testing.T) {
 	c.nowFn = func() time.Time { return now }
 
 	stream := testStream(31)
-	stream.PreferredServerKey = "a"
 	c.active_streams[stream.StreamID] = stream
+	testSetRoutePreferred(c, stream.StreamID, "a")
 
 	if !c.disableResolverConnection("a", "test disable") {
 		t.Fatal("expected resolver a to be disabled")
@@ -876,9 +876,7 @@ func TestLateResolverSuccessRetractsPriorTimeoutEvent(t *testing.T) {
 	c.collectExpiredResolverTimeouts(timeoutAt)
 	c.trackResolverSuccess([]byte{0x00, 0x4d}, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5350}, "", receivedAt)
 
-	c.resolverHealthMu.Lock()
-	state := c.resolverHealth["a"]
-	c.resolverHealthMu.Unlock()
+	state := testGetResolverHealthState(c, "a")
 
 	if state == nil {
 		t.Fatal("expected resolver health state to exist")
@@ -1050,9 +1048,7 @@ func TestResolverHealthSuccessClearsTimeoutHistory(t *testing.T) {
 	c.recordResolverHealthEvent("a", false, base)
 	c.recordResolverHealthEvent("a", true, base.Add(3*time.Second))
 
-	c.resolverHealthMu.Lock()
-	state := c.resolverHealth["a"]
-	c.resolverHealthMu.Unlock()
+	state := testGetResolverHealthState(c, "a")
 
 	if state == nil {
 		t.Fatal("expected resolver health state to exist")

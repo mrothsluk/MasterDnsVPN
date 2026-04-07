@@ -12,6 +12,7 @@ import (
 	"sort"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	Enums "masterdnsvpn-go/internal/enums"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -386,4 +387,21 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (c *Client) shouldTransmitQueuedStreamPacket(stream *Stream_client, item *clientStreamTXPacket) bool {
+	if c == nil || stream == nil || item == nil {
+		return false
+	}
+
+	if item.PacketType != Enums.PACKET_STREAM_DATA && item.PacketType != Enums.PACKET_STREAM_RESEND {
+		return true
+	}
+
+	arqObj, ok := stream.Stream.(*arq.ARQ)
+	if !ok || arqObj == nil {
+		return false
+	}
+
+	return arqObj.HasPendingSequence(item.SequenceNum)
 }

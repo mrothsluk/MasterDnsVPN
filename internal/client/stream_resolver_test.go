@@ -38,6 +38,9 @@ func buildTestClientWithResolvers(cfg config.ClientConfig, keys ...string) *Clie
 		ptrs[i] = &c.connections[i]
 	}
 	c.balancer.SetConnections(ptrs)
+	if c.runtime != nil {
+		c.runtime.LoadConnections(c.connections)
+	}
 	return c
 }
 
@@ -54,11 +57,11 @@ func TestSelectTargetConnectionsForPacketPrefersStickyStreamResolver(t *testing.
 	}, "a", "b", "c")
 
 	stream := testStream(7)
-	stream.PreferredServerKey = "b"
-	stream.LastResolverFailoverAt = time.Now()
 	c.active_streams[stream.StreamID] = stream
+	testSetRoutePreferred(c, stream.StreamID, "b")
+	testSetRouteLastFailoverAt(c, stream.StreamID, time.Now())
 
-	selected, err := c.selectTargetConnectionsForPacket(Enums.PACKET_STREAM_DATA, stream.StreamID)
+	selected, err := c.runtime.SelectTargetsForPacket(c, Enums.PACKET_STREAM_DATA, stream.StreamID)
 	if err != nil {
 		t.Fatalf("selectTargetConnectionsForPacket returned error: %v", err)
 	}
@@ -76,18 +79,16 @@ func TestEnsureStreamPreferredConnectionSkipsRuntimeDisabledResolver(t *testing.
 	}, "a", "b")
 
 	stream := testStream(8)
-	stream.PreferredServerKey = "a"
 	c.active_streams[stream.StreamID] = stream
+	testSetRoutePreferred(c, stream.StreamID, "a")
 
-	c.resolverHealthMu.Lock()
-	c.runtimeDisabled["a"] = resolverDisabledState{
+	testSetRuntimeDisabled(c, "a", resolverDisabledState{
 		DisabledAt:  time.Now(),
 		NextRetryAt: time.Now().Add(time.Minute),
 		Cause:       "test",
-	}
-	c.resolverHealthMu.Unlock()
+	})
 
-	selected, err := c.selectTargetConnectionsForPacket(Enums.PACKET_STREAM_DATA, stream.StreamID)
+	selected, err := c.runtime.SelectTargetsForPacket(c, Enums.PACKET_STREAM_DATA, stream.StreamID)
 	if err != nil {
 		t.Fatalf("selectTargetConnectionsForPacket returned error: %v", err)
 	}
@@ -97,8 +98,8 @@ func TestEnsureStreamPreferredConnectionSkipsRuntimeDisabledResolver(t *testing.
 	if selected[0].Key != "b" {
 		t.Fatalf("expected runtime-disabled preferred resolver to be skipped, got=%q", selected[0].Key)
 	}
-	if stream.PreferredServerKey != "b" {
-		t.Fatalf("expected preferred resolver to switch immediately, got=%q", stream.PreferredServerKey)
+	if state := testGetRouteState(c, stream.StreamID); state.PreferredResolverKey != "b" {
+		t.Fatalf("expected preferred resolver to switch immediately, got=%q", state.PreferredResolverKey)
 	}
 }
 
@@ -110,11 +111,11 @@ func TestSelectTargetConnectionsForPacketFailsOverOnResendStreak(t *testing.T) {
 	}, "a", "b")
 
 	stream := testStream(9)
-	stream.PreferredServerKey = "a"
-	stream.LastResolverFailoverAt = time.Now().Add(-2 * time.Second)
 	c.active_streams[stream.StreamID] = stream
+	testSetRoutePreferred(c, stream.StreamID, "a")
+	testSetRouteLastFailoverAt(c, stream.StreamID, time.Now().Add(-2*time.Second))
 
-	selected, err := c.selectTargetConnectionsForPacket(Enums.PACKET_STREAM_RESEND, stream.StreamID)
+	selected, err := c.runtime.SelectTargetsForPacket(c, Enums.PACKET_STREAM_RESEND, stream.StreamID)
 	if err != nil {
 		t.Fatalf("selectTargetConnectionsForPacket returned error: %v", err)
 	}
@@ -136,7 +137,7 @@ func TestEnsureStreamPreferredConnectionDoesNotStartFailoverCooldown(t *testing.
 	stream := testStream(12)
 	c.active_streams[stream.StreamID] = stream
 
-	selected, err := c.selectTargetConnectionsForPacket(Enums.PACKET_STREAM_DATA, stream.StreamID)
+	selected, err := c.runtime.SelectTargetsForPacket(c, Enums.PACKET_STREAM_DATA, stream.StreamID)
 	if err != nil {
 		t.Fatalf("selectTargetConnectionsForPacket returned error: %v", err)
 	}
@@ -146,11 +147,11 @@ func TestEnsureStreamPreferredConnectionDoesNotStartFailoverCooldown(t *testing.
 	if selected[0].Key != "a" {
 		t.Fatalf("expected initial preferred resolver to be a, got=%q", selected[0].Key)
 	}
-	if !stream.LastResolverFailoverAt.IsZero() {
+	if state := testGetRouteState(c, stream.StreamID); !state.LastFailoverAt.IsZero() {
 		t.Fatal("expected initial preferred assignment to not stamp LastResolverFailoverAt")
 	}
 
-	selected, err = c.selectTargetConnectionsForPacket(Enums.PACKET_STREAM_RESEND, stream.StreamID)
+	selected, err = c.runtime.SelectTargetsForPacket(c, Enums.PACKET_STREAM_RESEND, stream.StreamID)
 	if err != nil {
 		t.Fatalf("selectTargetConnectionsForPacket returned error: %v", err)
 	}
@@ -160,7 +161,7 @@ func TestEnsureStreamPreferredConnectionDoesNotStartFailoverCooldown(t *testing.
 	if selected[0].Key != "b" {
 		t.Fatalf("expected immediate failover from initial preferred resolver, got=%q", selected[0].Key)
 	}
-	if stream.LastResolverFailoverAt.IsZero() {
+	if state := testGetRouteState(c, stream.StreamID); state.LastFailoverAt.IsZero() {
 		t.Fatal("expected real failover to stamp LastResolverFailoverAt")
 	}
 }
@@ -173,11 +174,11 @@ func TestSelectTargetConnectionsForPacketRespectsFailoverCooldown(t *testing.T) 
 	}, "a", "b")
 
 	stream := testStream(10)
-	stream.PreferredServerKey = "a"
-	stream.LastResolverFailoverAt = time.Now()
 	c.active_streams[stream.StreamID] = stream
+	testSetRoutePreferred(c, stream.StreamID, "a")
+	testSetRouteLastFailoverAt(c, stream.StreamID, time.Now())
 
-	selected, err := c.selectTargetConnectionsForPacket(Enums.PACKET_STREAM_RESEND, stream.StreamID)
+	selected, err := c.runtime.SelectTargetsForPacket(c, Enums.PACKET_STREAM_RESEND, stream.StreamID)
 	if err != nil {
 		t.Fatalf("selectTargetConnectionsForPacket returned error: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestSelectTargetConnectionsForPacketUsesSetupDuplicationCount(t *testing.T)
 		SetupPacketDuplicationCount: 3,
 	}, "a", "b", "c")
 
-	selected, err := c.selectTargetConnectionsForPacket(Enums.PACKET_STREAM_SYN, 99)
+	selected, err := c.runtime.SelectTargetsForPacket(c, Enums.PACKET_STREAM_SYN, 99)
 	if err != nil {
 		t.Fatalf("selectTargetConnectionsForPacket returned error: %v", err)
 	}
@@ -210,7 +211,7 @@ func TestSelectTargetConnectionsForPacketAppliesDuplicationCountToPing(t *testin
 		SetupPacketDuplicationCount: 4,
 	}, "a", "b", "c", "d")
 
-	selected, err := c.selectTargetConnectionsForPacket(Enums.PACKET_PING, 42)
+	selected, err := c.runtime.SelectTargetsForPacket(c, Enums.PACKET_PING, 42)
 	if err != nil {
 		t.Fatalf("packet %s: unexpected error: %v", Enums.PacketTypeName(Enums.PACKET_PING), err)
 	}
@@ -225,7 +226,7 @@ func TestSelectTargetConnectionsForPacketCountUsesPlannerCount(t *testing.T) {
 		SetupPacketDuplicationCount: 5,
 	}, "a", "b", "c", "d")
 
-	selected, err := c.selectTargetConnectionsForPacketCount(Enums.PACKET_PING, 42, 1)
+	selected, err := c.runtime.SelectTargetsForPacketCount(c, Enums.PACKET_PING, 42, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -238,13 +239,13 @@ func TestNoteStreamProgressResetsResolverResendStreak(t *testing.T) {
 	c := buildTestClientWithResolvers(config.ClientConfig{}, "a")
 
 	stream := testStream(11)
-	stream.ResolverResendStreak = 4
 	c.active_streams[stream.StreamID] = stream
+	testSetRouteResendStreak(c, stream.StreamID, 4)
 
-	c.noteStreamProgress(stream.StreamID)
+	c.runtime.noteStreamProgress(stream.StreamID)
 
-	if stream.ResolverResendStreak != 0 {
-		t.Fatalf("expected resend streak reset, got=%d", stream.ResolverResendStreak)
+	if state := testGetRouteState(c, stream.StreamID); state.ResolverResendStreak != 0 {
+		t.Fatalf("expected resend streak reset, got=%d", state.ResolverResendStreak)
 	}
 }
 
@@ -262,7 +263,7 @@ func TestSelectAlternateStreamConnectionUsesBestScoredCandidate(t *testing.T) {
 		c.balancer.ReportSuccess("c", 10*time.Millisecond)
 	}
 
-	selected, ok := c.selectAlternateStreamConnection("a")
+	selected, ok := c.runtime.selectAlternateConnection(c, "a")
 	if !ok {
 		t.Fatal("expected alternate connection")
 	}
