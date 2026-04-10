@@ -21,6 +21,7 @@ import (
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
+	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
 const (
@@ -32,7 +33,7 @@ const (
 	mtuProbeDownMinSize = mtuProbeUpMinSize + 2
 	mtuProbeMinDownSize = 30
 	mtuProbeMaxDownSize = 4096
-	sessionAcceptSize   = 7
+	sessionAcceptSize   = VpnProto.SessionAcceptPayloadSize
 )
 
 var preSessionPacketTypes = buildPreSessionPacketTypes()

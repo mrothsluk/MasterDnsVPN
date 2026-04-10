@@ -29,7 +29,7 @@ var (
 
 const (
 	sessionInitPayloadSize      = 10
-	sessionAcceptPayloadSize    = 7
+	sessionAcceptPayloadSize    = VpnProto.SessionAcceptPayloadSize
 	sessionBusyPayloadSize      = 4
 	sessionCloseBurstMaxTargets = 10
 	sessionCloseBurstRounds     = 3
@@ -146,7 +146,8 @@ func (c *Client) applySessionInitPacket(packet VpnProto.Packet, initPayload []by
 		c.setSessionInitBusyUntil(time.Now().Add(c.cfg.SessionInitBusyRetryInterval()))
 		return ErrSessionInitBusy
 	case Enums.PACKET_SESSION_ACCEPT:
-		if len(packet.Payload) < sessionAcceptPayloadSize || !bytes.Equal(packet.Payload[3:7], verifyCode[:]) {
+		sessionAccept, err := VpnProto.DecodeSessionAcceptPayload(packet.Payload)
+		if err != nil || !bytes.Equal(sessionAccept.VerifyCode[:], verifyCode[:]) {
 			return ErrSessionInitFailed
 		}
 
@@ -157,10 +158,13 @@ func (c *Client) applySessionInitPacket(packet VpnProto.Packet, initPayload []by
 			return nil
 		}
 
-		c.sessionID = packet.Payload[0]
-		c.sessionCookie = packet.Payload[1]
+		c.sessionID = sessionAccept.SessionID
+		c.sessionCookie = sessionAccept.SessionCookie
 		c.responseMode = initPayload[0]
-		c.uploadCompression, c.downloadCompression = compression.SplitPair(packet.Payload[2])
+		c.uploadCompression, c.downloadCompression = compression.SplitPair(sessionAccept.CompressionPair)
+		if sessionAccept.HasClientPolicySync {
+			c.applySessionClientPolicy(sessionAccept.ClientPolicy)
+		}
 		c.sessionReady = true
 		c.applySessionCompressionPolicy()
 		c.clearSessionInitBusyUntil()
@@ -169,6 +173,56 @@ func (c *Client) applySessionInitPacket(packet VpnProto.Packet, initPayload []by
 		return nil
 	default:
 		return ErrSessionInitFailed
+	}
+}
+
+func (c *Client) applySessionClientPolicy(policy VpnProto.SessionAcceptClientPolicy) {
+	if c == nil {
+		return
+	}
+
+	settings := VpnProto.ApplySessionAcceptClientPolicy(VpnProto.SessionAcceptClientSettings{
+		PacketDuplicationCount:      c.cfg.PacketDuplicationCount,
+		SetupPacketDuplicationCount: c.cfg.SetupPacketDuplicationCount,
+		MaxUploadMTU:                c.cfg.MaxUploadMTU,
+		MaxDownloadMTU:              c.cfg.MaxDownloadMTU,
+		RXTXWorkers:                 c.cfg.RX_TX_Workers,
+		PingAggressiveInterval:      c.cfg.PingAggressiveIntervalSeconds,
+		MaxPacketsPerBatch:          c.cfg.MaxPacketsPerBatch,
+		ARQWindowSize:               c.cfg.ARQWindowSize,
+		ARQDataNackMaxGap:           c.cfg.ARQDataNackMaxGap,
+		CompressionMinSize:          c.cfg.CompressionMinSize,
+		ARQInitialRTOSeconds:        c.cfg.ARQInitialRTOSeconds,
+		ARQControlInitialRTOSeconds: c.cfg.ARQControlInitialRTOSeconds,
+		ARQMaxRTOSeconds:            c.cfg.ARQMaxRTOSeconds,
+		ARQControlMaxRTOSeconds:     c.cfg.ARQControlMaxRTOSeconds,
+	}, policy)
+
+	c.cfg.PacketDuplicationCount = settings.PacketDuplicationCount
+	c.cfg.SetupPacketDuplicationCount = settings.SetupPacketDuplicationCount
+	c.cfg.MaxUploadMTU = settings.MaxUploadMTU
+	c.cfg.MaxDownloadMTU = settings.MaxDownloadMTU
+	c.cfg.RX_TX_Workers = settings.RXTXWorkers
+	c.tunnelRX_TX_Workers = settings.RXTXWorkers
+	c.cfg.PingAggressiveIntervalSeconds = settings.PingAggressiveInterval
+	c.cfg.MaxPacketsPerBatch = settings.MaxPacketsPerBatch
+	c.cfg.ARQWindowSize = settings.ARQWindowSize
+	c.cfg.ARQDataNackMaxGap = settings.ARQDataNackMaxGap
+	c.cfg.CompressionMinSize = settings.CompressionMinSize
+	c.cfg.ARQInitialRTOSeconds = settings.ARQInitialRTOSeconds
+	c.cfg.ARQControlInitialRTOSeconds = settings.ARQControlInitialRTOSeconds
+
+	if c.syncedUploadMTU > 0 {
+		c.syncedUploadMTU = min(c.syncedUploadMTU, c.cfg.MaxUploadMTU)
+	}
+
+	if c.syncedDownloadMTU > 0 {
+		c.syncedDownloadMTU = min(c.syncedDownloadMTU, c.cfg.MaxDownloadMTU)
+	}
+
+	if c.syncedUploadMTU > 0 {
+		c.safeUploadMTU = computeSafeUploadMTU(c.syncedUploadMTU, c.mtuCryptoOverhead)
+		c.maxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(c.syncedUploadMTU, 80, c.cfg.MaxPacketsPerBatch)
 	}
 }
 
