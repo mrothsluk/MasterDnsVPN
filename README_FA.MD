@@ -470,8 +470,8 @@ sudo journalctl -u masterdnsvpn-client -f
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
-| `MIN_UPLOAD_MTU` | `38` | نباید منفی باشد | حداقل MTU قابل قبول برای مسیر upload است.<br>اگر resolver فقط MTU کمتر از این را جواب بدهد، برای upload کنار گذاشته می‌شود.<br>عدد پایین‌تر پایداری را بیشتر می‌کند ولی سرعت را کم می‌کند. |
-| `MIN_DOWNLOAD_MTU` | `100` | نباید منفی باشد | همان مفهوم برای download.<br>اگر مقدار خیلی بالا باشد، resolverهای بیشتری از همان اول حذف می‌شوند. |
+| `MIN_UPLOAD_MTU` | `38` | نباید منفی باشد | حداقل MTU قابل قبول برای مسیر upload است.<br>اگر resolver فقط MTU کمتر از این را جواب بدهد، برای upload کنار گذاشته می‌شود.<br>عدد پایین‌تر پایداری را بیشتر می‌کند ولی سرعت را کم می‌کند.<br>حداقل اعمال‌شده برابر سایز payload برای Session Init (10) است. |
+| `MIN_DOWNLOAD_MTU` | `100` | نباید منفی باشد | همان مفهوم برای download.<br>اگر مقدار خیلی بالا باشد، resolverهای بیشتری از همان اول حذف می‌شوند.<br>حداقل اعمال‌شده برابر سایز payload برای Session Accept (20) است. |
 | `MAX_UPLOAD_MTU` | `150` | نباید از `MIN_UPLOAD_MTU` کوچک‌تر باشد | سقف جست‌وجوی MTU برای upload در تست اولیه.<br>بازه‌ی خیلی بزرگ startup را طولانی‌تر می‌کند. |
 | `MAX_DOWNLOAD_MTU` | `500` | نباید از `MIN_DOWNLOAD_MTU` کوچک‌تر باشد | سقف جست‌وجوی MTU برای download.<br>اگر می‌دانید شبکه شما محدود است، کوچک‌تر کردن این مقدار startup را سریع‌تر می‌کند. |
 | `MTU_TEST_RETRIES` | `2` | اگر کمتر از `1` باشد، fallback اعمال می‌شود | هر probe MTU چند بار retry شود.<br>روی resolverهای پر loss عدد بالاتر می‌تواند مفید باشد، ولی startup را کندتر می‌کند. |
@@ -483,6 +483,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `MTU_USING_SECTION_SEPARATOR_TEXT` | `""` | رشته | یک متن اختیاری برای جدا کردن runها یا سکشن‌های خروجی داخل فایل MTU. |
 | `MTU_REMOVED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) removed at {TIME} due to {CAUSE}"` | رشته | قالب متن لاگی که وقتی یک resolver از لیست فعال حذف می‌شود نوشته می‌شود. |
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | رشته | قالب متن لاگی که وقتی resolver بعداً دوباره سالم تشخیص داده می‌شود نوشته می‌شود. |
+| `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | رشته | قالب متن لاگی که وقتی resolver توسط بررسی سلامت پس‌زمینه دوباره فعال می‌شود نوشته می‌شود. |
 
 ### ۳.۴.۷) بخش ⚙️ Workerها، queueها و زمان‌بندی runtime
 

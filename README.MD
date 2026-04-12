@@ -482,8 +482,8 @@ These settings are critical on the server:
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `MIN_UPLOAD_MTU` | `38` | positive integer | Smallest upload MTU the client accepts during resolver testing. |
-| `MIN_DOWNLOAD_MTU` | `100` | positive integer | Smallest download MTU the client accepts during resolver testing. |
+| `MIN_UPLOAD_MTU` | `38` | positive integer | Smallest upload MTU the client accepts during resolver testing. Minimum enforced is the session-init payload size (10). |
+| `MIN_DOWNLOAD_MTU` | `100` | positive integer | Smallest download MTU the client accepts during resolver testing. Minimum enforced is the session-accept payload size (20). |
 | `MAX_UPLOAD_MTU` | `150` | positive integer | Upper bound for upload MTU testing. |
 | `MAX_DOWNLOAD_MTU` | `500` | positive integer | Upper bound for download MTU testing. |
 | `MTU_TEST_RETRIES` | `2` | if invalid, fallback applies | Number of retries for each MTU probe. |
@@ -495,6 +495,7 @@ These settings are critical on the server:
 | `MTU_USING_SECTION_SEPARATOR_TEXT` | `""` | string | Optional separator text inserted into the MTU output file. |
 | `MTU_REMOVED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) removed at {TIME} due to {CAUSE}"` | string | Log/output format when a resolver is removed from the valid set. |
 | `MTU_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})"` | string | Log/output format when a resolver is restored. |
+| `MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT` | `"Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})"` | string | Log/output format when a resolver is restored by background health checks. |
 
 ### 3.4.7) 🧵 Runtime Workers, Queues, and Timers
 
