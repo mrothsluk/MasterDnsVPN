@@ -104,6 +104,7 @@ type Balancer struct {
 	autoDisableEnabled       bool
 	autoDisableTimeoutWindow time.Duration
 	onResolverDisabled       func(*Connection, string)
+	confirmResolverDown      func(*Connection, time.Duration) bool
 }
 
 type connectionStats struct {
@@ -169,6 +170,15 @@ func (b *Balancer) SetResolverDisabledHandler(handler func(*Connection, string))
 	}
 	b.mu.Lock()
 	b.onResolverDisabled = handler
+	b.mu.Unlock()
+}
+
+func (b *Balancer) SetResolverDownConfirmHandler(handler func(*Connection, time.Duration) bool) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.confirmResolverDown = handler
 	b.mu.Unlock()
 }
 
@@ -355,17 +365,17 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	stats.applyHalfLife()
 
 	totalTimedOut, totalSent := stats.recordWindowTimeout(now, window)
-
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	conn, ok := b.connectionByKeyLocked(serverKey)
 	if !ok || !conn.IsValid {
+		b.mu.Unlock()
 		return false
 	}
 
-	minObservations := autoDisableMinObservationsForActiveCount(len(b.activeIDs), window)
+	activeCount := len(b.activeIDs)
+	minObservations := autoDisableMinObservationsForActiveCount(activeCount, window)
 	if int(totalSent) < minObservations || totalTimedOut != totalSent {
+		b.mu.Unlock()
 		return false
 	}
 
@@ -377,8 +387,31 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 		minActive = 2
 	}
 
-	if len(b.activeIDs) <= minActive {
+	if activeCount <= minActive {
+		b.mu.Unlock()
 		return false
+	}
+
+	confirmHandler := b.confirmResolverDown
+	confirmRequired := confirmHandler != nil && activeCount <= 20
+	if confirmRequired {
+		connCopy := *conn
+		b.mu.Unlock()
+
+		down := confirmHandler(&connCopy, window)
+
+		b.mu.Lock()
+		conn, ok = b.connectionByKeyLocked(serverKey)
+		if !ok || !conn.IsValid {
+			b.mu.Unlock()
+			return false
+		}
+
+		if !down {
+			stats.resetWindow()
+			b.mu.Unlock()
+			return false
+		}
 	}
 
 	conn.IsValid = false
@@ -399,6 +432,7 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))
 	}
 
+	b.mu.Unlock()
 	return true
 }
 

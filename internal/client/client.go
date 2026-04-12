@@ -315,9 +315,15 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		cfg.AutoDisableTimeoutServers,
 		time.Duration(cfg.AutoDisableTimeoutWindowSeconds*float64(time.Second)),
 	)
+
 	c.balancer.SetResolverDisabledHandler(func(conn *Connection, cause string) {
 		c.appendMTURemovedServerLine(conn, cause)
 	})
+
+	c.balancer.SetResolverDownConfirmHandler(func(conn *Connection, window time.Duration) bool {
+		return c.confirmResolverDown(conn, window)
+	})
+
 	c.pingManager = newPingManager(c)
 	return c
 }

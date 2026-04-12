@@ -492,6 +492,61 @@ func (c *Client) resolverHealthProbeTimeout() time.Duration {
 	return timeout
 }
 
+func (c *Client) confirmResolverDown(conn *Connection, window time.Duration) bool {
+	if c == nil || conn == nil || conn.Key == "" {
+		return true
+	}
+
+	if !c.cfg.AutoDisableTimeoutServers {
+		return true
+	}
+
+	transport, err := newUDPQueryTransport(conn.ResolverLabel)
+	if err != nil {
+		return true
+	}
+	defer transport.conn.Close()
+
+	timeout := 350 * time.Millisecond
+	if window > 0 && window < time.Second {
+		timeout = window / 3
+	}
+
+	if timeout < 200*time.Millisecond {
+		timeout = 200 * time.Millisecond
+	}
+
+	if timeout > time.Second {
+		timeout = time.Second
+	}
+
+	mtuSize := c.syncedUploadMTU
+	if mtuSize < 32 {
+		mtuSize = 32
+	}
+
+	if mtuSize > 96 {
+		mtuSize = 96
+	}
+
+	const attempts = 2
+	for attempt := 0; attempt < attempts; attempt++ {
+		ok, _, err := c.sendUploadMTUProbe(
+			context.Background(),
+			*conn,
+			transport,
+			mtuSize,
+			timeout,
+			mtuProbeOptions{Quiet: true, IsRetry: attempt > 0},
+		)
+
+		if err == nil && ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Client) runConnectionMTUTest(ctx context.Context, conn Connection, serverID int, total int, maxUploadPayload int, counters *mtuScanCounters) {
 	if conn.Key == "" {
 		return
