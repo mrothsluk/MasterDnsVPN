@@ -15,7 +15,7 @@
 // # Basic usage
 //
 //	m := tunnel.NewManager()
-//	_ = m.Add("primary", "vpn.example.com:443", 10*time.Second)
+//	_ = m.Add("primary", "vpn.example.com:443", 15*time.Second)
 //	tn, _ := m.Get("primary")
 //	if err := tn.Connect(); err != nil {
 //		log.Fatal(err)
@@ -26,6 +26,9 @@
 //
 // The default dial timeout passed to [Manager.Add] should be at least
 // 5 seconds in production; values below that may cause spurious failures
-// on high-latency connections. I personally use 15*time.Second for my
-// home setup.
+// on high-latency connections.
+//
+// Personal note: I've found 15*time.Second works well for both home and
+// mobile connections. Bumped the example above from 10s to 15s to reflect
+// this. On very lossy mobile networks, consider going up to 20*time.Second.
 package tunnel
