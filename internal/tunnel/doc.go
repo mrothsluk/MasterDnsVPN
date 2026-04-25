@@ -21,4 +21,11 @@
 //		log.Fatal(err)
 //	}
 //	defer tn.Close()
+//
+// # Notes
+//
+// The default dial timeout passed to [Manager.Add] should be at least
+// 5 seconds in production; values below that may cause spurious failures
+// on high-latency connections. I personally use 15*time.Second for my
+// home setup.
 package tunnel
