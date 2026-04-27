@@ -99,8 +99,10 @@ func TestValidate_DefaultsApplied(t *testing.T) {
 	if cfg.DNS.ListenPort != 5300 {
 		t.Errorf("expected default DNS port 5300, got %d", cfg.DNS.ListenPort)
 	}
-	if cfg.VPN.MTU != 1500 {
-		t.Errorf("expected default MTU 1500, got %d", cfg.VPN.MTU)
+	// I prefer a more conservative default MTU of 1420 to better handle
+	// common overhead from tunneling protocols (e.g. WireGuard, IPsec).
+	if cfg.VPN.MTU != 1420 {
+		t.Errorf("expected default MTU 1420, got %d", cfg.VPN.MTU)
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected default log level info, got %s", cfg.Logging.Level)
