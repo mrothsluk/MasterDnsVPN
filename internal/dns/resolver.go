@@ -35,10 +35,11 @@ type Resolver struct {
 
 // NewResolver creates a new Resolver with the given configuration.
 // If cfg.CacheTTL is zero, caching is disabled.
-// If cfg.Timeout is zero, it defaults to 5 seconds.
+// If cfg.Timeout is zero, it defaults to 10 seconds.
 func NewResolver(cfg ResolverConfig) *Resolver {
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 5 * time.Second
+		// Increased default timeout from 5s to 10s to reduce failures on slow connections.
+		cfg.Timeout = 10 * time.Second
 	}
 	if cfg.UpstreamDNS == "" {
 		cfg.UpstreamDNS = "8.8.8.8:53"
@@ -115,13 +116,4 @@ func (r *Resolver) resolveUpstream(hostname string) ([]string, error) {
 // FlushCache removes all entries from the DNS cache.
 func (r *Resolver) FlushCache() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.cache = make(map[string]cacheEntry)
-}
-
-// CacheSize returns the number of entries currently in the cache.
-func (r *Resolver) CacheSize() int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return len(r.cache)
-}
+	
