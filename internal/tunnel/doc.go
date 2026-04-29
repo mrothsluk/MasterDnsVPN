@@ -31,4 +31,8 @@
 // Personal note: I've found 15*time.Second works well for both home and
 // mobile connections. Bumped the example above from 10s to 15s to reflect
 // this. On very lossy mobile networks, consider going up to 20*time.Second.
+//
+// TODO(me): Look into adding a reconnect/backoff helper so callers don't
+// have to roll their own retry loop — this comes up in basically every
+// place I use [Manager].
 package tunnel
