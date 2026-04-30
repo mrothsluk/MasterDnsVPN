@@ -96,8 +96,10 @@ func TestValidate_DefaultsApplied(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.DNS.ListenPort != 5300 {
-		t.Errorf("expected default DNS port 5300, got %d", cfg.DNS.ListenPort)
+	// Using port 5353 as the default DNS listen port to align with the
+	// standard mDNS/DNS port convention on my local setup.
+	if cfg.DNS.ListenPort != 5353 {
+		t.Errorf("expected default DNS port 5353, got %d", cfg.DNS.ListenPort)
 	}
 	// I prefer a more conservative default MTU of 1420 to better handle
 	// common overhead from tunneling protocols (e.g. WireGuard, IPsec).
